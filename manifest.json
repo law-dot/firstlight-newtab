@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "初见 · 新标签页",
+  "version": "1.0.0",
+  "description": "初见 Firstlight：本地优先的新标签页，分组网站图标、搜索、壁纸与待办。数据只存在本机。",
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "bookmarks",
+    "history"
+  ],
+  "host_permissions": [
+    "https://*.bing.com/*",
+    "https://bing.biturl.top/*",
+    "https://picsum.photos/*",
+    "https://fastly.picsum.photos/*",
+    "https://wttr.in/*",
+    "https://*.baidu.com/*",
+    "https://api.frankfurter.dev/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "icons": {
+    "16": "assets/icons/16.png",
+    "32": "assets/icons/32.png",
+    "48": "assets/icons/48.png",
+    "128": "assets/icons/128.png"
+  }
+}

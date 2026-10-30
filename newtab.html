@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>初见</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="bg" id="bg"></div>
+  <div class="bg-dim" id="dim"></div>
+  <canvas class="fx" id="fx" aria-hidden="true"></canvas>
+  <div class="bg-credit" id="bgCredit"></div>
+
+  <div class="ticker ticker-empty" id="ticker" aria-hidden="true">
+    <div class="ticker-track" id="tickerTrack"></div>
+  </div>
+
+  <div class="app">
+    <header class="hero">
+      <div class="clock-wrap">
+        <div class="clock" id="clock" role="button" tabindex="0" title="点击番茄钟">
+          <div class="time" id="time">--:--</div>
+          <div class="pomo-chip" id="pomoChip" hidden></div>
+        </div>
+        <div class="meta">
+          <span id="greet"></span>
+          <span class="sep">·</span>
+          <button class="date-btn" id="dateBtn" type="button" title="点击日历">
+            <span id="date"></span>
+          </button>
+        </div>
+      </div>
+      <div class="hero-right">
+        <button class="weather" id="weather" type="button" title="点击刷新天气">
+          <span class="wx-icon" id="wxIcon"></span>
+          <span class="wx-body">
+            <span class="wx-line">
+              <span class="wx-temp" id="wxTemp">--°</span>
+              <span class="wx-desc" id="wxDesc">加载中</span>
+            </span>
+            <span class="wx-sub">
+              <span id="wxCity">定位中</span>
+              <span id="wxRange"></span>
+            </span>
+          </span>
+        </button>
+        <div class="toolbar">
+          <button class="icon-btn" id="btnEdit" title="编辑模式" aria-label="编辑模式">
+            <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>
+          </button>
+          <button class="icon-btn" id="btnTheme" title="切换深浅色" aria-label="切换深浅色">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4v16" /></svg>
+          </button>
+          <button class="icon-btn" id="btnSettings" title="设置" aria-label="设置">
+            <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="search-row">
+      <form class="search" id="searchForm" autocomplete="off">
+        <select id="engineSelect" class="engine" aria-label="搜索引擎"></select>
+        <input id="q" type="text" placeholder="搜索，或输入网址后回车" spellcheck="false" />
+        <button class="go" type="submit" aria-label="搜索">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
+        </button>
+      </form>
+      <button class="icon-btn todo-fab" id="todoFab" type="button" title="待办" aria-label="待办">
+        <svg viewBox="0 0 24 24"><path d="M4 7l1.2 1.2L7.4 6M4 12l1.2 1.2L7.4 11M4 17l1.2 1.2L7.4 16"/><path d="M10.5 7h9.5M10.5 12h9.5M10.5 17h9.5"/></svg>
+        <span class="todo-badge" id="todoBadge" hidden></span>
+      </button>
+      <div class="suggest" id="suggest" role="listbox" hidden></div>
+    </div>
+
+    <div class="content">
+      <main class="main">
+        <div class="grid" id="grid"></div>
+      </main>
+
+      <aside class="todo" id="todoPanel">
+        <div class="todo-head">
+          <h2>待办</h2>
+          <span class="todo-left" id="todoLeft"></span>
+        </div>
+        <form class="todo-add" id="todoForm">
+          <input id="todoInput" placeholder="添加一件小事…" maxlength="80" />
+        </form>
+        <ul class="todo-list" id="todoList"></ul>
+      </aside>
+    </div>
+  </div>
+
+  <nav class="dock" id="dock" aria-label="快捷 Dock"></nav>
+
+  <aside class="side" id="side" aria-label="分组">
+    <div class="side-head">
+      <h2>分组</h2>
+      <button class="icon-btn" id="btnCollapseSide" title="收起分组栏" aria-label="收起分组栏">
+        <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+      </button>
+    </div>
+    <a class="side-pin" href="rss.html" title="RSS 订阅">
+      <svg viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.6"/></svg>
+      <span>RSS 订阅</span>
+    </a>
+    <div class="side-list" id="tabs"></div>
+  </aside>
+
+  <button class="icon-btn side-rail" id="btnOpenSide" title="展开分组栏" aria-label="展开分组栏">
+    <svg viewBox="0 0 24 24"><path d="M10 6l6 6-6 6"/></svg>
+  </button>
+
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2>设置</h2>
+      <button class="icon-btn" id="btnHelp" title="使用说明" aria-label="使用说明">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.3-1.3.8-1.3 1.7"/><circle cx="12" cy="17" r="0.9" fill="currentColor"/></svg>
+      </button>
+      <button class="icon-btn" id="btnCloseDrawer" aria-label="关闭">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <section class="field">
+      <label>主题</label>
+      <div class="seg" id="themeSeg">
+        <button type="button" data-val="auto">自动</button>
+        <button type="button" data-val="light">浅色</button>
+        <button type="button" data-val="dark">深色</button>
+      </div>
+    </section>
+
+    <section class="field">
+      <label>搜索引擎</label>
+      <select id="engineSetting"></select>
+      <input id="customEngine" placeholder="自定义：https://example.com/search?q=%s" />
+    </section>
+
+    <section class="field">
+      <label>壁纸</label>
+      <div class="swatches" id="swatches"></div>
+      <div class="row">
+        <button type="button" class="btn" id="btnUpload">上传本地图片</button>
+        <input type="file" id="fileWallpaper" accept="image/*" hidden />
+        <label class="color-label">纯色<input type="color" id="colorWallpaper" value="#1b2735" /></label>
+      </div>
+      <div class="row">
+        <button type="button" class="btn" id="btnOnline">在线壁纸</button>
+        <button type="button" class="btn" id="btnOnlineNext">换一张</button>
+      </div>
+      <div class="seg" id="onlineMode">
+        <button type="button" data-val="daily">每天一张</button>
+        <button type="button" data-val="rotate">每次开新标签换</button>
+        <button type="button" data-val="interval">定时切换</button>
+      </div>
+      <div class="seg seg-3" id="onlineInterval" hidden>
+        <button type="button" data-val="10">10 分钟</button>
+        <button type="button" data-val="30">30 分钟</button>
+        <button type="button" data-val="60">1 小时</button>
+      </div>
+      <div class="seg seg-3" id="onlineSource">
+        <button type="button" data-val="auto">自动</button>
+        <button type="button" data-val="bing">Bing</button>
+        <button type="button" data-val="custom">自选网站</button>
+      </div>
+      <input id="customWallpaper" placeholder="粘贴壁纸网站或图片地址，如 https://example.com/wallpapers" />
+      <p class="hint" id="onlineStatus"></p>
+    </section>
+
+    <section class="field">
+      <label>背景遮罩 <span class="val" id="dimVal">30%</span></label>
+      <input type="range" id="dimRange" min="0" max="80" step="5" />
+    </section>
+
+    <section class="field">
+      <label>天气</label>
+      <input id="weatherCity" placeholder="城市，如 上海 / Beijing（留空按 IP 自动定位）" />
+      <p class="hint">每 2 小时自动更新一次；点起始页右上角的天气卡片可立即刷新。</p>
+    </section>
+
+    <section class="field">
+      <label>待机模式</label>
+      <select id="idleSelect">
+        <option value="0">关闭</option>
+        <option value="-1">常开</option>
+        <option value="0.5">30 秒</option>
+        <option value="1">1 分钟</option>
+        <option value="5">5 分钟</option>
+        <option value="10">10 分钟</option>
+        <option value="20">20 分钟</option>
+        <option value="30">30 分钟</option>
+      </select>
+      <p class="hint">无操作达到设定时间后，只留时钟、搜索框、天气和工具栏，动一下鼠标即可恢复；「常开」在停止操作几秒后自动回到待机。</p>
+    </section>
+
+    <section class="field switch-row">
+      <label>待机跑马灯</label>
+      <label class="switch">
+        <input type="checkbox" id="tickerToggle" />
+        <span></span>
+      </label>
+    </section>
+
+    <section class="field">
+      <label>天气动效</label>
+      <div class="seg" id="fxSeg">
+        <button type="button" data-val="off">关闭</button>
+        <button type="button" data-val="idle">仅待机</button>
+        <button type="button" data-val="always">始终显示</button>
+      </div>
+      <p class="hint">按当前天气在壁纸前叠加雨雪云雾等轻柔动效；进入待机会先刷新一次天气。</p>
+    </section>
+
+    <section class="field">
+      <label>待办栏</label>
+      <div class="seg seg-3" id="todoSeg">
+        <button type="button" data-val="fab">圆形图标</button>
+        <button type="button" data-val="docked">常驻右侧</button>
+        <button type="button" data-val="hidden">隐藏</button>
+      </div>
+      <p class="hint">圆形图标：收在搜索框右侧，点击展开；图标角标显示未完成数量。</p>
+    </section>
+
+    <section class="field">
+      <label>网站卡片</label>
+      <div class="seg" id="siteSeg">
+        <button type="button" data-val="minimal">简洁</button>
+        <button type="button" data-val="standard">标准</button>
+        <button type="button" data-val="detail">详情</button>
+      </div>
+      <p class="hint">简洁只显示图标；详情额外显示网站说明，说明可自动获取或在编辑网站时填写。</p>
+    </section>
+
+    <section class="field">
+      <label>布局</label>
+      <div class="seg" id="layoutSeg">
+        <button type="button" data-val="compact">紧凑</button>
+        <button type="button" data-val="standard">标准</button>
+        <button type="button" data-val="comfortable">宽松</button>
+      </div>
+      <p class="hint">调整网站卡片的间距与高度。</p>
+    </section>
+
+    <section class="field">
+      <label>Dock 栏</label>
+      <div class="seg" id="dockSeg">
+        <button type="button" data-val="auto">智能</button>
+        <button type="button" data-val="manual">手动</button>
+        <button type="button" data-val="off">关闭</button>
+      </div>
+      <p class="hint">智能模式按点击次数自动收录最常用的 5 个网站（编辑模式下可屏蔽）；手动模式可在编辑模式下把分组里的网站拖到 Dock。<button type="button" class="hint-btn" id="dockUnblock" hidden></button></p>
+    </section>
+
+    <section class="field switch-row">
+      <label>靠右边缘打开设置</label>
+      <label class="switch">
+        <input type="checkbox" id="edgeToggle" />
+        <span></span>
+      </label>
+    </section>
+
+    <section class="field">
+      <label>数据同步</label>
+      <div class="seg" id="syncSeg">
+        <button type="button" data-val="off">关闭</button>
+        <button type="button" data-val="browser">浏览器账号</button>
+        <button type="button" data-val="webdav" disabled title="后续版本提供">WebDAV</button>
+      </div>
+      <p class="hint" id="syncHint">数据只保存在本机，不上传任何服务器。</p>
+    </section>
+
+    <section class="field">
+      <label>快捷键</label>
+      <div class="hotkey-list" id="hotkeyList"></div>
+      <p class="hint">点击某项录制新快捷键；按 Backspace/Delete 清除（禁用）；按 Esc 取消录制；冲突会提示。</p>
+    </section>
+
+    <section class="field">
+      <label>数据</label>
+      <div class="row">
+        <button type="button" class="btn" id="btnExport">导出备份</button>
+        <button type="button" class="btn" id="btnImport">导入备份</button>
+        <button type="button" class="btn danger" id="btnReset">恢复默认</button>
+      </div>
+      <input type="file" id="fileImport" accept="application/json" hidden />
+      <p class="hint">所有数据保存在本机浏览器，不上传任何服务器。</p>
+    </section>
+  </aside>
+
+  <dialog class="dlg" id="siteDialog">
+    <form id="siteForm">
+      <h3 id="siteDlgTitle">添加网站</h3>
+      <label>名称<input id="siteTitle" required maxlength="20" /></label>
+      <label>网址<input id="siteUrl" required placeholder="https://example.com" /></label>
+      <label>图标地址（可选）<input id="siteIcon" placeholder="留空则用首字母" /></label>
+      <label>说明（可选）<input id="siteDesc" maxlength="120" placeholder="一句话介绍，留空则自动获取" /></label>
+      <div class="dlg-acts">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dlg" id="groupDialog">
+    <form id="groupForm">
+      <h3 id="groupDlgTitle">新建分组</h3>
+      <label>分组名称<input id="groupName" required maxlength="12" /></label>
+      <div class="dlg-acts">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dlg pomo-dlg" id="pomoDialog">
+    <button type="button" class="dlg-x" data-close aria-label="关闭">×</button>
+    <form id="pomoForm" method="dialog">
+      <h3>番茄钟 <span class="pomo-round" id="pomoRound"></span></h3>
+
+      <div class="pomo-display" id="pomoDisplay">25:00</div>
+      <div class="pomo-phase" id="pomoPhase">专注</div>
+
+      <div class="pomo-controls">
+        <button type="button" class="btn primary" id="pomoStart">开始</button>
+        <button type="button" class="btn" id="pomoPause" hidden>暂停</button>
+        <button type="button" class="btn" id="pomoReset">重置</button>
+        <button type="button" class="btn" id="pomoSkip" hidden>跳过</button>
+      </div>
+
+      <div class="pomo-sets">
+        <div class="pomo-set">
+          <label>专注</label>
+          <input type="number" id="pomoWork" min="1" max="180" />
+          <span>分</span>
+        </div>
+        <div class="pomo-set">
+          <label>短休</label>
+          <input type="number" id="pomoShort" min="1" max="60" />
+          <span>分</span>
+        </div>
+        <div class="pomo-set">
+          <label>长休</label>
+          <input type="number" id="pomoLong" min="1" max="60" />
+          <span>分</span>
+        </div>
+        <div class="pomo-set">
+          <label>长休轮次</label>
+          <input type="number" id="pomoEvery" min="1" max="12" />
+          <span>轮</span>
+        </div>
+      </div>
+
+      <label class="switch-row">
+        <span>自动进入下一段</span>
+        <label class="switch">
+          <input type="checkbox" id="pomoAuto" />
+          <span></span>
+        </label>
+      </label>
+      <label class="switch-row">
+        <span>结束时响铃</span>
+        <label class="switch">
+          <input type="checkbox" id="pomoSound" />
+          <span></span>
+        </label>
+      </label>
+    </form>
+  </dialog>
+
+  <dialog class="dlg cal-dlg" id="calDialog">
+    <button type="button" class="dlg-x" data-close aria-label="关闭">×</button>
+    <div class="cal-head">
+      <button type="button" class="cal-nav" id="calPrev" aria-label="上个月">‹</button>
+      <div class="cal-title" id="calTitle"></div>
+      <button type="button" class="cal-nav" id="calNext" aria-label="下个月">›</button>
+      <button type="button" class="cal-today" id="calToday">今天</button>
+    </div>
+
+    <div class="cal-week">
+      <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+    </div>
+    <div class="cal-grid" id="calGrid"></div>
+
+    <div class="cal-side">
+      <div class="cal-side-head">
+        <div class="cal-side-date" id="calSideDate"></div>
+        <button type="button" class="btn small" id="calAddBtn">+ 日程</button>
+      </div>
+      <ul class="cal-events" id="calEvents"></ul>
+      <div class="cal-empty" id="calEmpty">这一天还没有日程</div>
+
+      <form class="cal-add" id="calAddForm" hidden>
+        <input type="text" id="calAddText" placeholder="要做什么" maxlength="120" required />
+        <div class="cal-add-row">
+          <input type="time" id="calAddTime" />
+          <button type="submit" class="btn primary small">保存</button>
+          <button type="button" class="btn small" id="calAddCancel">取消</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <dialog class="dlg help-dlg" id="helpDialog">
+    <div class="help-head">
+      <div class="help-title">初见 · 使用说明</div>
+      <div class="help-ver" id="helpVer">v1.12.0</div>
+    </div>
+    <div class="help-body">
+
+      <h3>👋 欢迎使用初见</h3>
+      <p>这是一个干净的新标签页扩展，所有数据保存在你的浏览器里，不收集、不上传。</p>
+
+      <h3>🔗 网站与分组</h3>
+      <p>左侧栏管理分组，中间是网站卡片。编辑模式（右上角铅笔图标或 <kbd>Ctrl/Cmd+E</kbd>）下可以拖拽排序、增删网站。</p>
+      <ul>
+        <li><b>简洁模式</b>：只显示图标，适合强迫症</li>
+        <li><b>标准模式</b>：图标 + 标题，默认</li>
+        <li><b>详情模式</b>：图标 + 标题 + 站点简介</li>
+      </ul>
+      <p>模式和间距在设置抽屉里可调（「网站卡片」「布局」两项）。</p>
+
+      <h3>📌 智能 Dock</h3>
+      <p>底部 Dock 默认是<b>智能模式</b>——自动收录你用得最多的 5 个网站并按频率排序，点击次数越多排位越靠前。编辑模式下可以手动屏蔽某个站（✕ 按钮）。</p>
+      <p>如果更喜欢自己排，在设置里把 Dock 模式改成「手动」，然后拖拽收藏即可。</p>
+
+      <h3>📰 RSS 订阅</h3>
+      <p>左侧栏最上方固定入口，点击跳到阅读器页面。添加你喜欢的 RSS 地址（可以用 RSSHub 把微博/B站/知乎变成 RSS）。待机模式下，跑马灯会在顶部滚动最新标题。</p>
+
+      <h3>⏰ 待机模式</h3>
+      <p>鼠标/键盘静止一段时间后自动进入待机：壁纸模糊变暗，界面只剩大时钟和跑马灯。在设置里调待机时长（默认 10 分钟），可以改成常开或关闭。</p>
+
+      <h3>🎨 壁纸</h3>
+      <p>四种来源：<b>在线壁纸</b>（默认，Bing 每日图）、<b>预设渐变</b>（12 款纯色）、<b>本地上传</b>、<b>纯色</b>。在线壁纸支持定时切换（每 10/30/60 分钟自动换一张）。</p>
+
+      <h3>⌨️ 快捷键（可自定义）</h3>
+      <div class="hotkeys-help" id="hotkeysHelp"></div>
+      <p>点击设置抽屉里的快捷键行可以录制新的绑定。</p>
+
+      <h3>🔄 浏览器账号同步</h3>
+      <p>设置 → 数据同步里选择「浏览器账号」开启，分组、设置、收藏会随 Edge/Chrome 账号自动同步到所有设备。同步配置本身只存本机，不会同步。</p>
+
+      <h3>💡 小贴士</h3>
+      <ul>
+        <li><kbd>/</kbd> 或 <kbd>Ctrl/Cmd+K</kbd> 聚焦搜索框</li>
+        <li><kbd>Ctrl/Cmd+,</kbd> 打开设置抽屉</li>
+        <li><kbd>Esc</kbd> 关闭抽屉或退出编辑模式</li>
+        <li>鼠标悬停屏幕<b>右边缘</b>也能弹出设置（默认开启）</li>
+        <li>所有数据随时可以导出备份（设置 → 数据）</li>
+      </ul>
+
+    </div>
+    <div class="help-foot">
+      <button type="button" class="btn primary" id="btnHelpClose">开始使用</button>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RSS 订阅 · 初见</title>
+  <link rel="icon" href="assets/icons/128.png" />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/rss.css" />
+</head>
+<body class="rss-page">
+  <header class="rss-head">
+    <a class="rss-back" href="newtab.html" title="返回主页">
+      <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+      <span>返回</span>
+    </a>
+    <h1>RSS 订阅</h1>
+    <div class="rss-actions">
+      <button class="btn primary" id="addFeedBtn">添加源</button>
+      <button class="btn" id="refreshBtn" title="忽略缓存强制刷新">刷新</button>
+    </div>
+  </header>
+
+  <nav class="chips" id="chips" aria-label="订阅源筛选"></nav>
+  <main class="entries" id="entries"></main>
+
+  <dialog class="dlg" id="feedDialog">
+    <form id="feedForm">
+      <h3>添加订阅源</h3>
+      <label>名称（可选）<input id="feedTitle" maxlength="40" placeholder="留空则自动获取" /></label>
+      <label>Feed 地址<input id="feedUrl" required placeholder="https://example.com/feed.xml" /></label>
+      <p class="dlg-hint">支持 RSS 2.0 / Atom。微博、B站、知乎等平台可通过 RSSHub 生成地址后粘贴到这里。</p>
+      <div class="dlg-acts">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">添加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="js/rss.js"></script>
+</body>
+</html>
