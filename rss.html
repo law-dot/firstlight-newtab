@@ -1,12 +1,13 @@
-<!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<!DOCTYPE html>
+<html data-theme="dark" lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<script src="/page/page_comm/inject.js"></script>
+  <meta charset="UTF-8">
+  <meta content="width=device-width, initial-scale=1.0" name="viewport">
   <title>RSS 订阅 · 初见</title>
-  <link rel="icon" href="assets/icons/128.png" />
-  <link rel="stylesheet" href="css/style.css" />
-  <link rel="stylesheet" href="css/rss.css" />
+  <link href="assets/icons/128.png" rel="icon">
+  <link href="css/style.css" rel="stylesheet">
+  <link href="css/rss.css" rel="stylesheet">
 </head>
 <body class="rss-page">
   <header class="rss-head">
@@ -21,22 +22,22 @@
     </div>
   </header>
 
-  <nav class="chips" id="chips" aria-label="订阅源筛选"></nav>
+  <nav aria-label="订阅源筛选" class="chips" id="chips"></nav>
   <main class="entries" id="entries"></main>
 
   <dialog class="dlg" id="feedDialog">
     <form id="feedForm">
       <h3>添加订阅源</h3>
-      <label>名称（可选）<input id="feedTitle" maxlength="40" placeholder="留空则自动获取" /></label>
-      <label>Feed 地址<input id="feedUrl" required placeholder="https://example.com/feed.xml" /></label>
+      <label>名称（可选）<input id="feedTitle" maxlength="40" placeholder="留空则自动获取"></label>
+      <label>Feed 地址<input id="feedUrl" placeholder="https://example.com/feed.xml" required></label>
       <p class="dlg-hint">支持 RSS 2.0 / Atom。微博、B站、知乎等平台可通过 RSSHub 生成地址后粘贴到这里。</p>
       <div class="dlg-acts">
-        <button type="button" class="btn" data-close>取消</button>
-        <button type="submit" class="btn primary">添加</button>
+        <button class="btn" data-close type="button">取消</button>
+        <button class="btn primary" type="submit">添加</button>
       </div>
     </form>
   </dialog>
 
-  <script type="module" src="js/rss.js"></script>
+  <script src="js/rss.js" type="module"></script>
 </body>
 </html>

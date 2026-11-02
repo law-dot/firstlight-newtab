@@ -1,10 +1,11 @@
-// 通用工具：DOM 选择、防抖、提示、URL 与图标、网络
+// 通用工具：DOM 选择、提示、URL 与图标、网络
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 let toastTimer = null;
-export function toast(msg, ms = 1800) {
+
+function toastEl() {
   let el = $('#toast');
   if (!el) {
     el = document.createElement('div');
@@ -12,18 +13,39 @@ export function toast(msg, ms = 1800) {
     el.className = 'toast';
     document.body.append(el);
   }
+  return el;
+}
+
+export function toast(msg, ms = 1800) {
+  const el = toastEl();
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), ms);
 }
 
-export function debounce(fn, ms) {
-  let t = null;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
+// 带一个动作按钮的提示：导错了能一键撤销，小白才敢点
+export function toastAction(msg, label, onAction, ms = 7000) {
+  const el = toastEl();
+  el.textContent = '';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'toast-act';
+  btn.textContent = label;
+  btn.onclick = () => {
+    el.classList.remove('show');
+    clearTimeout(toastTimer);
+    onAction();
   };
+  el.append(text, btn);
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('show');
+    el.textContent = '';
+  }, ms);
 }
 
 export function clamp(n, lo, hi) {

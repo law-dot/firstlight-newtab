@@ -12,7 +12,7 @@ import { $, $$, toast } from './core/utils.js';
 import { renderEngines, bindSearch, hideSuggest } from './features/search.js';
 import {
   refreshWeather, checkWeatherRefresh, bindWeather,
-  fx, fxSync, fxStop, fxSize, fxBuild
+  fx, fxSync, fxStop, fxSize, watchMotionPref
 } from './features/weather.js';
 import { pomo, bindPomodoro } from './features/pomodoro.js';
 import { bindCalendar } from './features/calendar.js';
@@ -76,10 +76,14 @@ async function init() {
   bindDrawerAutoClose();
   scheduleIdle();
 
+  // 窗口尺寸变了只需重设画布与整屏渐变：雪碧图是固定尺寸的，不必重烘
+  let resizeTimer = 0;
   window.addEventListener('resize', () => {
     if (!fx.running) return;
-    fxSize();
-    fxBuild(fx.kind);
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (fx.running) fxSize();
+    }, 160);
   });
 
   document.addEventListener('visibilitychange', () => {
@@ -103,6 +107,8 @@ function bind() {
   bindPomodoro();
   bindCalendar();
   bindGlobal();
+  // 系统「减少动态效果」变化 + 电池供电降频，只在这里接一次
+  watchMotionPref();
 
   // 首次使用自动弹出说明（showOnboarding 默认 true，关掉后不再弹）
   if (state.data.settings.showOnboarding) {
@@ -112,20 +118,48 @@ function bind() {
 
 /* 编辑模式开关 + 全局快捷键 + 待机时长选择 */
 
-/* 快捷键注册表：4 个动作，每个可绑多个快捷键（数组），空数组=禁用 */
+/* 当前平台是否以 Cmd 作为命令键。navigator.platform 已废弃但仍是最可靠的同步取值，
+   优先用 userAgentData.platform（Chromium 110+ 支持），两者都取不到时按非 mac 处理。 */
+export const IS_MAC = (() => {
+  try {
+    const p =
+      (navigator.userAgentData && navigator.userAgentData.platform) ||
+      navigator.platform ||
+      '';
+    return /mac|iphone|ipad|ipod/i.test(p);
+  } catch {
+    return false;
+  }
+})();
+
+export const MOD_LABEL = IS_MAC ? '⌘' : 'Ctrl';
+
+/* 快捷键注册表：4 个动作，每个可绑多个快捷键（数组），空数组=禁用
+   统一用 Mod 表示「当前平台的命令键」：mac 是 Cmd，Windows/Linux 是 Ctrl。
+   写死 Meta 会导致 Windows 上三个快捷键全部失效（v1.0 的实际 bug）。 */
 export const HOTKEY_DEFS = [
-  { id: 'search', label: '聚焦搜索框', default: ['/', 'Meta+K'] },
-  { id: 'edit',   label: '切换编辑模式', default: ['Meta+E'] },
-  { id: 'drawer', label: '打开设置抽屉', default: ['Meta+,'] },
+  { id: 'search', label: '聚焦搜索框', default: ['/', 'Mod+K'] },
+  { id: 'edit',   label: '切换编辑模式', default: ['Mod+E'] },
+  { id: 'drawer', label: '打开设置抽屉', default: ['Mod+,'] },
   { id: 'escape', label: '关闭抽屉/对话框', default: ['Escape'] }
 ];
 
-// 把 KeyboardEvent 规范化成标准字符串：Meta+K / Ctrl+Shift+/ / Escape
+// 旧版数据里存的 Meta+* 一律视为「命令键」：mac 上它就是 Cmd，Win 上是同步过来的历史值
+export function canonHotkey(str) {
+  return String(str || '').replace(/^Meta\+/, 'Mod+');
+}
+
+// 把 KeyboardEvent 规范化成标准字符串：Mod+K / Ctrl+Shift+/ / Escape
 export function normalizeHotkey(e) {
   if (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta') return null;
   const parts = [];
-  if (e.metaKey) parts.push('Meta');
-  else if (e.ctrlKey) parts.push('Ctrl');
+  if (IS_MAC) {
+    if (e.metaKey) parts.push('Mod');   // Cmd
+    if (e.ctrlKey) parts.push('Ctrl');  // mac 上 Ctrl 是另一个真实的键
+  } else {
+    if (e.ctrlKey) parts.push('Mod');   // Ctrl
+    if (e.metaKey) parts.push('Meta');  // Win 键
+  }
   if (e.altKey) parts.push('Alt');
   if (e.shiftKey) parts.push('Shift');
   let key = e.key;
@@ -135,14 +169,22 @@ export function normalizeHotkey(e) {
   return parts.join('+');
 }
 
-// 取当前动作的所有绑定（已合并默认值，不存在的自动补）
+// 取当前动作的所有绑定（规范形式，用于匹配）
 export function getHotkeys(actionId) {
   const defaults = HOTKEY_DEFS.find((d) => d.id === actionId)?.default || [];
   const user = state.data?.settings?.hotkeys?.[actionId];
-  if (user === undefined) return defaults.slice();
   // 空数组 = 用户主动禁用
-  if (Array.isArray(user)) return user.slice();
+  if (Array.isArray(user)) return user.map(canonHotkey);
   return defaults.slice();
+}
+
+// 展示用：把 Mod 换成当前平台的键名（⌘ / Ctrl）
+export function displayHotkey(str) {
+  return String(str || '').replace(/\bMod\+/g, `${MOD_LABEL}+`);
+}
+
+export function getHotkeysDisplay(actionId) {
+  return getHotkeys(actionId).map(displayHotkey);
 }
 
 // 检查冲突：某个快捷键字符串是否已被其他动作占用
@@ -181,13 +223,16 @@ function bindGlobal() {
   });
 
   /* 快捷键分发：读 settings.hotkeys，每个动作可绑多个快捷键
-     - 输入框里不拦截修饰键组合（保留浏览器默认）
-     - Escape 优先级：对话框 → 抽屉 → 编辑模式 */
+     - 全项目**只有这一个**全局 keydown 监听器。
+       v1.0 曾在 document 上又挂了一个，冒泡顺序 document 先于 window，
+       导致下面这条优先级链从未生效，按一次 Esc 抽屉和弹窗会一起关。
+     - 输入框里不拦截裸键（保留正常打字）
+     - Escape 优先级：搜索建议 → 对话框(最上层) → 抽屉 → 编辑模式 */
   window.addEventListener('keydown', (e) => {
     const tag = (e.target.tagName || '').toLowerCase();
     const inEditable =
-      tag === 'input' || tag === 'textarea' ||
-      e.target.isContentEditable || e.target.closest('[contenteditable]');
+      tag === 'input' || tag === 'textarea' || tag === 'select' ||
+      e.target.isContentEditable || !!e.target.closest?.('[contenteditable]');
     const keyStr = normalizeHotkey(e);
     if (!keyStr) return; // 单独修饰键，忽略
 
@@ -205,9 +250,14 @@ function bindGlobal() {
     e.preventDefault();
 
     if (matched === 'escape') {
-      const dialog = document.querySelector('dialog[open]');
-      if (dialog) { dialog.close(); return; }
+      // 1) 搜索建议优先关掉，避免连带关掉抽屉
+      if (!$('#suggest').hidden) { hideSuggest(); return; }
+      // 2) 只关最上层那个对话框（DOM 顺序里最后一个即最上层的 modal）
+      const dialogs = $$('dialog[open]');
+      if (dialogs.length) { dialogs[dialogs.length - 1].close(); return; }
+      // 3) 再关抽屉
       if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
+      // 4) 最后退编辑模式
       if (state.editMode) {
         state.editMode = false;
         document.body.classList.remove('editing');
@@ -231,19 +281,6 @@ function bindGlobal() {
     scheduleIdle();
     toast(`待机模式：${e.target.selectedOptions[0].textContent}`);
     e.target.blur();
-  });
-
-  document.addEventListener('keydown', (e) => {
-    const tag = document.activeElement?.tagName || '';
-    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(tag);
-    if (e.key === '/' && !typing) {
-      e.preventDefault();
-      $('#q').focus();
-    }
-    if (e.key === 'Escape') {
-      closeDrawer();
-      $$('dialog[open]').forEach((d) => d.close());
-    }
   });
 }
 

@@ -5,7 +5,8 @@ import {
 } from '../core/utils.js';
 import { uid } from '../core/store.js';
 import { renderDock, trackSiteUse } from './dock.js';
-import { ensureDescriptions } from './sitedesc.js';
+import { fallbackDesc, watchCard, resetDescObserver } from './sitedesc.js';
+import { bookmarksAvailable, openImportDialog, syncImportNote } from './bookmarkimport.js';
 import { renderAll } from '../app.js';
 
 export function renderTabs() {
@@ -87,10 +88,11 @@ export function currentGroup() {
   return state.data.groups.find((g) => g.id === state.activeGroupId) || state.data.groups[0];
 }
 
-/* 网站卡片显示模式：minimal 简洁 / standard 标准 / detail 详情，宽度递增 */
+/* 网站卡片显示模式：standard 标准（图标+标题）/ detail 详情（多一行简介）。
+   简洁模式在 v1.1 被砍掉：很多站点取不到 favicon，会退化成一排彩色圆球，
+   看起来像坏了——这是必然失败的形态，留着只会让小白以为软件有问题。 */
 export function applySiteMode() {
-  const mode = state.data.settings.siteMode || 'standard';
-  document.body.classList.toggle('site-minimal', mode === 'minimal');
+  const mode = state.data.settings.siteMode === 'standard' ? 'standard' : 'detail';
   document.body.classList.toggle('site-detail', mode === 'detail');
 }
 
@@ -105,16 +107,21 @@ export function renderGrid() {
   const grid = $('#grid');
   grid.textContent = '';
   const group = currentGroup();
+  const detail = state.data.settings.siteMode === 'detail';
+  resetDescObserver();
   if (!group) return;
 
-  group.sites.forEach((site) => grid.append(makeCard(site, group)));
+  group.sites.forEach((site) => grid.append(makeCard(site, group, detail)));
+  // 首启动引导：先把「这些是示例网站」讲清楚（上方提示条），
+  // 关掉之后缩成卡片区里的一个小格子，导入过一次就彻底收起。
+  const noteShown = syncImportNote();
+  if (!noteShown && state.data.settings.showImportCta !== false && bookmarksAvailable()) {
+    grid.append(makeImportTile());
+  }
   grid.append(makeAddTile(group));
-
-  // 详情模式：懒抓缺失的站点简介（内部做权限与去重判断）
-  ensureDescriptions(group);
 }
 
-function makeCard(site, group) {
+function makeCard(site, group, detail) {
   const card = document.createElement('a');
   card.className = 'card';
   card.href = site.url;
@@ -149,10 +156,10 @@ function makeCard(site, group) {
   name.className = 'name';
   name.textContent = site.title || hostOf(site.url);
 
-  // 详情模式：手动说明优先，其次自动抓取的简介
+  // 详情模式：简介永远有内容——手动 > 已抓到的 > 标题里的中文段 > 「分组名 · 域名」
   let desc = null;
-  if (state.data.settings.siteMode === 'detail') {
-    const text = site.desc || site.autoDesc;
+  if (detail) {
+    const text = fallbackDesc(site, group);
     if (text) {
       desc = document.createElement('div');
       desc.className = 'desc';
@@ -248,7 +255,29 @@ function makeCard(site, group) {
     moveSite(state.dragFromGroupId, state.dragSiteId, group.id, index + (after ? 1 : 0));
   });
 
+  // 详情模式：等这张卡真的滚进视口，再决定要不要抓简介
+  if (detail) watchCard(card, site, group);
+
   return card;
+}
+
+function makeImportTile() {
+  const btn = document.createElement('button');
+  btn.className = 'card import';
+  btn.type = 'button';
+  btn.title = '把浏览器收藏夹里的网站搬进来';
+
+  const ico = document.createElement('span');
+  ico.className = 'imp-ico';
+  ico.textContent = '⬇';
+
+  const label = document.createElement('span');
+  label.className = 'imp-label';
+  label.textContent = '导入收藏夹';
+
+  btn.append(ico, label);
+  btn.onclick = () => openImportDialog();
+  return btn;
 }
 
 function makeAddTile(group) {
@@ -324,7 +353,7 @@ function saveSite(e) {
   $('#siteDialog').close();
   persist();
   renderTabs();
-  renderGrid(); // 详情模式下 renderGrid 内部会自动补抓缺失的简介
+  renderGrid(); // 新卡片重建后，详情模式会重新排队抓简介
   renderDock();
   toast('已保存');
 }

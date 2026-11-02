@@ -6,28 +6,6 @@ import { fetchWithTimeout, escapeHtml } from '../core/utils.js';
 const TTL = 30 * 60 * 1000; // 同一源 30 分钟内不重复抓取
 const MAX_ITEMS = 20; // 每源最多保留条数，防止缓存膨胀
 
-/* ---------- 站点访问权限（与 manifest 的 optional_host_permissions 严格一致） ---------- */
-// 只能声明 manifest 里列出的 origins，否则 contains/request 会直接抛错
-const OPTIONAL_ORIGINS = ['https://*/*'];
-
-export async function hasFetchAccess() {
-  if (typeof chrome === 'undefined' || !chrome.permissions?.contains) return false;
-  try {
-    return await chrome.permissions.contains({ origins: OPTIONAL_ORIGINS });
-  } catch {
-    return false;
-  }
-}
-
-export async function requestFetchAccess() {
-  if (typeof chrome === 'undefined' || !chrome.permissions?.request) return false;
-  try {
-    return await chrome.permissions.request({ origins: OPTIONAL_ORIGINS });
-  } catch {
-    return false;
-  }
-}
-
 /* ---------- 解析 ---------- */
 function childText(node, names) {
   for (const el of node.children) {

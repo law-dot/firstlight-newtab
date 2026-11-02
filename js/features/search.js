@@ -39,24 +39,40 @@ export function buildEngineUrl(keyword) {
 export function bindSearch() {
   $('#searchForm').addEventListener('submit', (e) => {
     e.preventDefault();
-    // 如有选中的建议项
+
+    // 有选中项（含下方 runSuggest 自动预选的本地命中）
     if (state.suggestIndex >= 0 && state.suggestItems[state.suggestIndex]) {
       const item = state.suggestItems[state.suggestIndex];
       if (item.url) {
         openSuggestItem(item);
+        hideSuggest();
+        return;
       }
-      hideSuggest();
-      return;
     }
+
     const raw = $('#q').value.trim();
     if (!raw) return;
+
+    // 明确是网址就直接走
     if (/^https?:\/\//i.test(raw)) {
       location.href = raw;
-    } else if (/^[^\s]+\.[^\s]+$/.test(raw)) {
-      location.href = 'https://' + raw;
-    } else {
-      location.href = buildEngineUrl(raw);
+      return;
     }
+    if (/^[^\s]+\.[^\s]+$/.test(raw)) {
+      location.href = 'https://' + raw;
+      return;
+    }
+
+    // 建议还没算出来就按了回车（打字快的人常见）：
+    // 直接在分组里找一次，命中就打开，别把用户丢给搜索引擎
+    const quick = quickLocalHit(raw);
+    if (quick) {
+      hideSuggest();
+      location.href = quick;
+      return;
+    }
+
+    location.href = buildEngineUrl(raw);
   });
 
   $('#q').addEventListener('input', () => {
@@ -79,6 +95,7 @@ export function bindSearch() {
         suggestMove(-1);
       } else if (e.key === 'Escape') {
         e.preventDefault();
+        e.stopPropagation(); // 只关建议下拉，别再触发全局 Esc 去关抽屉
         hideSuggest();
       }
     } else if (e.key === 'ArrowDown') {
@@ -358,19 +375,25 @@ async function runSuggest(q) {
     g.sites.forEach((s) => {
       const title = (s.title || '').toLowerCase();
       const url = (s.url || '').toLowerCase();
-      if (!title && !url) return;
-      if (title.includes(needle) || url.includes(needle)) {
-        const exactTitle = (s.title || '').toLowerCase() === needle;
-        fromGroups.push({
-          type: 'group',
-          title: s.title || hostOf(s.url),
-          url: s.url,
-          groupName: g.name,
-          favicon: s.icon || faviconOf(s.url),
-          exact: exactTitle,
-          score: (exactTitle ? 100 : 60) + (title.includes(needle) ? 20 : 0)
-        });
-      }
+      // 简介也要参与匹配：用户常常「记得内容、忘了名字」
+      const desc = (s.desc || s.autoDesc || '').toLowerCase();
+      if (!title && !url && !desc) return;
+      const hitTitle = title.includes(needle);
+      const hitUrl = url.includes(needle);
+      const hitDesc = desc.includes(needle);
+      if (!hitTitle && !hitUrl && !hitDesc) return;
+      const exactTitle = title === needle;
+      fromGroups.push({
+        type: 'group',
+        title: s.title || hostOf(s.url),
+        url: s.url,
+        groupName: g.name,
+        favicon: s.icon || faviconOf(s.url),
+        exact: exactTitle,
+        // 只命中简介时，结果显示简介片段，让用户一眼确认「就是这个」
+        snippet: hitTitle || hitUrl ? '' : excerpt(desc, needle),
+        score: exactTitle ? 120 : hitTitle ? 80 : hitUrl ? 55 : 45
+      });
     });
   });
 
@@ -390,18 +413,65 @@ async function runSuggest(q) {
   const hItems = Array.from(merged.values()).filter((i) => i.type === 'history').sort((a, b) => (b.score || 0) - (a.score || 0));
   const eItems = Array.from(merged.values()).filter((i) => i.type === 'engine').sort((a, b) => (b.score || 0) - (a.score || 0));
 
-  if (gItems.length) sections.push({ label: '扩展分组', items: gItems.slice(0, SUGGEST_MAX) });
-  if (bItems.length) sections.push({ label: 'Edge 收藏夹', items: bItems.slice(0, SUGGEST_MAX) });
-  if (hItems.length) sections.push({ label: '浏览历史', items: hItems.slice(0, SUGGEST_MAX) });
+  // 分节标题用的是用户自己的说法：「扩展分组」这种词小白看不懂，
+  // 看到会怀疑「这不是给我用的东西」。
+  if (gItems.length) sections.push({ label: '我的网站', items: gItems.slice(0, SUGGEST_MAX) });
+  if (bItems.length) sections.push({ label: '浏览器收藏夹', items: bItems.slice(0, SUGGEST_MAX) });
+  if (hItems.length) sections.push({ label: '最近浏览', items: hItems.slice(0, SUGGEST_MAX) });
   if (eItems.length && !allTitlesStartWith(sections, eItems[0].title)) {
-    sections.push({ label: '搜索建议', items: eItems.slice(0, 6) });
+    sections.push({ label: '上网搜索', items: eItems.slice(0, 6) });
   }
 
   state.suggestSections = sections;
   state.suggestItems = sections.flatMap((s) => s.items);
-  state.suggestIndex = -1;
+  // 预选：把最可能的本地命中高亮出来，回车即打开。
+  // v1.0 这里恒为 -1，导致「看到京东、回车却去百度搜」，对小白是灾难。
+  state.suggestIndex = pickDefaultIndex(state.suggestItems);
 
   renderSuggest();
+}
+
+/* 只有「标题/网址命中」的本地条目才配抢回车（score ≥ 80）。
+   仅命中简介（45）或网址片段（55）的不抢，避免误伤「我想搜一下」的情况。 */
+const DEFAULT_RANK = { group: 0, bookmark: 1, history: 2 };
+function pickDefaultIndex(items) {
+  let best = -1;
+  let bestRank = 99;
+  items.forEach((it, i) => {
+    const rank = DEFAULT_RANK[it.type];
+    if (rank === undefined || !it.url) return;
+    if ((it.score || 0) < 80) return;
+    if (rank < bestRank) { best = i; bestRank = rank; }
+  });
+  return best;
+}
+
+/* 建议还没生成时按了回车的同步兜底：只认「精确匹配」和「以查询词开头」 */
+function quickLocalHit(raw) {
+  const needle = raw.toLowerCase();
+  if (needle.length < 2) return null;
+  let prefix = null;
+  for (const g of state.data.groups) {
+    for (const s of g.sites) {
+      const t = (s.title || '').toLowerCase();
+      if (!t || !s.url) continue;
+      if (t === needle) return s.url;
+      if (!prefix && t.startsWith(needle)) prefix = s.url;
+    }
+  }
+  return prefix;
+}
+
+/* 围绕命中词截一段简介，供结果行展示 */
+function excerpt(text, needle, width = 46) {
+  const i = text.indexOf(needle);
+  if (i < 0) return text.slice(0, width);
+  const start = Math.max(0, i - 12);
+  return (
+    (start > 0 ? '…' : '') +
+    text.slice(start, start + width) +
+    (start + width < text.length ? '…' : '')
+  );
 }
 
 function allTitlesStartWith(sections, title) {
@@ -555,7 +625,9 @@ function makeSuggestRow(item) {
   titleSpan.textContent = item.title;
   const urlSpan = document.createElement('div');
   urlSpan.className = 's-url';
-  urlSpan.textContent = item.url || item.badge || '';
+  // 命中简介时显示简介片段（比域名更能帮用户确认「就是这个」）
+  urlSpan.textContent = item.snippet || item.url || item.badge || '';
+  if (item.snippet) urlSpan.title = item.url;
   body.append(titleSpan, urlSpan);
 
   row.append(ico, body);
@@ -585,14 +657,14 @@ function makeSuggestRow(item) {
 function suggestMove(delta) {
   if (!state.suggestItems.length) return;
   state.suggestIndex = Math.max(0, Math.min(state.suggestItems.length - 1, state.suggestIndex + delta));
-  highlightSuggest();
+  highlightSuggest(true);
 }
 
-function highlightSuggest() {
+// scroll=false 用于首次渲染：预选高亮但不滚动，否则每敲一个字页面都可能跳一下
+function highlightSuggest(scroll = false) {
   const rows = $$('.suggest-item', $('#suggest'));
   rows.forEach((r, i) => r.classList.toggle('selected', i === state.suggestIndex));
-  // 选中项滚进可视区
-  if (state.suggestIndex >= 0 && rows[state.suggestIndex]) {
+  if (scroll && state.suggestIndex >= 0 && rows[state.suggestIndex]) {
     rows[state.suggestIndex].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 }

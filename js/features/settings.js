@@ -5,14 +5,15 @@ import {
   normalize, makeDefault, clearWallpaper,
   loadData, loadSyncConf, saveSyncConf
 } from '../core/store.js';
-import { initSync, isSyncAvailable } from '../core/sync.js';
+import { initSync, isSyncAvailable, overwriteLocalFromRemote } from '../core/sync.js';
 import { renderWeather, WEATHER_TTL, fxSync } from './weather.js';
 import { applyWallpaper } from './wallpaper.js';
 import { applyTodoMode } from './todo.js';
 import { applyDockMode, renderDock } from './dock.js';
-import { applySiteMode, applyLayout, renderGrid, currentGroup } from './sidebar.js';
-import { ensureDescriptions, requestFetchAccess } from './sitedesc.js';
-import { renderAll, HOTKEY_DEFS, normalizeHotkey, getHotkeys, findHotkeyConflict, setHotkey, resetHotkey } from '../app.js';
+import { applySiteMode, applyLayout, renderGrid } from './sidebar.js';
+import { enableDescriptionsNow, bindDescNote } from './sitedesc.js';
+import { bindBookmarkImport } from './bookmarkimport.js';
+import { renderAll, HOTKEY_DEFS, normalizeHotkey, getHotkeys, displayHotkey, findHotkeyConflict, setHotkey, resetHotkey } from '../app.js';
 
 export function applyTheme() {
   const theme = state.data.settings.theme;
@@ -20,6 +21,68 @@ export function applyTheme() {
     theme === 'dark' ||
     (theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  applyAccent();
+}
+
+/* ================= 强调色 ================= */
+// 用户可自选界面强调色：本质是用内联样式覆盖 :root 上的 4 个 CSS 变量。
+// --accent-soft / --glow / --glow-strong 只是同一 RGB 的不同透明度，
+// 明暗两套主题的透明度不同，所以跟在 applyTheme 后面一起重算。
+const ACCENT_DEFAULT = '#7c6cf6';
+const ACCENT_PRESETS = [
+  ACCENT_DEFAULT, // 紫（默认）
+  '#3d7ff2',      // 蓝
+  '#2fb6c9',      // 青
+  '#38a169',      // 绿
+  '#d99a3d',      // 琥珀
+  '#e06a3f',      // 橙
+  '#d9538c',      // 玫红
+  '#8a93a3'       // 石墨
+];
+
+function hexRgb(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return [124, 108, 246];
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+export function applyAccent() {
+  const hex = state.data.settings.accent || ACCENT_DEFAULT;
+  const [r, g, b] = hexRgb(hex);
+  const theme = state.data.settings.theme;
+  const dark =
+    theme === 'dark' ||
+    (theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  const root = document.documentElement;
+  root.style.setProperty('--accent', hex);
+  root.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, ${dark ? 0.28 : 0.18})`);
+  root.style.setProperty('--glow', `rgba(${r}, ${g}, ${b}, ${dark ? 0.5 : 0.34})`);
+  root.style.setProperty('--glow-strong', `rgba(${r}, ${g}, ${b}, ${dark ? 0.72 : 0.5})`);
+}
+
+function setAccent(hex) {
+  state.data.settings.accent = hex;
+  persist();
+  applyAccent();
+  renderAccentUI();
+}
+
+function renderAccentUI() {
+  const box = $('#accentSwatches');
+  if (!box) return;
+  const cur = (state.data.settings.accent || ACCENT_DEFAULT).toLowerCase();
+  box.textContent = '';
+  for (const hex of ACCENT_PRESETS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'swatch' + (hex.toLowerCase() === cur ? ' on' : '');
+    b.style.background = hex;
+    b.title = hex;
+    b.addEventListener('click', () => setAccent(hex));
+    box.appendChild(b);
+  }
+  $('#accentPicker').value = cur;
 }
 
 export function syncSettingsUI() {
@@ -27,6 +90,7 @@ export function syncSettingsUI() {
   const dim = s.wallpaper.dim ?? 30;
 
   $$('#themeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.val === s.theme));
+  renderAccentUI();
   $('#engineSelect').value = s.engine;
   $('#engineSetting').value = s.engine;
   $('#customEngine').value = s.customEngine || '';
@@ -44,7 +108,7 @@ export function syncSettingsUI() {
   if (blockedN) $('#dockUnblock').textContent = `已屏蔽 ${blockedN} 个网站 · 恢复`;
   $('#idleSelect').value = String(s.idleMinutes || 0);
   $$('#fxSeg button').forEach((b) =>
-    b.classList.toggle('on', b.dataset.val === (s.fxMode || 'idle'))
+    b.classList.toggle('on', b.dataset.val === (s.fxMode || 'always'))
   );
   $('#colorWallpaper').value = s.wallpaper.type === 'color' ? s.wallpaper.value : '#1b2735';
   if (document.activeElement !== $('#weatherCity')) {
@@ -97,6 +161,8 @@ function paintSyncUI() {
     b.classList.toggle('on', b.dataset.val === syncConf.mode)
   );
   const hint = $('#syncHint');
+  const pullBtn = $('#btnSyncPull');
+  if (pullBtn) pullBtn.hidden = syncConf.mode !== 'browser';
   if (syncConf.mode === 'browser') {
     const last = syncConf.lastSyncAt
       ? `上次同步：${new Date(syncConf.lastSyncAt).toLocaleString('zh-CN', {
@@ -131,6 +197,26 @@ async function setSyncMode(mode) {
   syncConf = await loadSyncConf(); // initSync 可能更新了 lastSyncAt
   paintSyncUI();
   toast(mode === 'browser' ? '已开启浏览器账号同步' : '已关闭同步');
+}
+
+// 手动「以云端为准」：覆盖前先确认，避免误点丢数据
+async function pullFromRemote() {
+  const yes = window.confirm(
+    '这会用云端的数据覆盖本机的分组、待办、订阅源等全部内容，且无法撤销。\n\n确定继续吗？'
+  );
+  if (!yes) return;
+  const res = await overwriteLocalFromRemote();
+  if (!res.ok) {
+    toast(res.reason === 'off' ? '请先开启浏览器账号同步' : '云端没有可拉取的数据');
+    return;
+  }
+  state.data = await loadData();
+  renderAll();
+  applyTheme();
+  await applyWallpaper();
+  syncConf = await loadSyncConf();
+  paintSyncUI();
+  toast(`已从云端恢复 ${res.count} 项数据`);
 }
 
 /* ================= 抽屉开关 ================= */
@@ -269,14 +355,10 @@ export function bindSettings() {
       syncSettingsUI();
       applySiteMode();
       renderGrid();
-      // 详情模式需要抓站点简介：趁机申请全站访问权限（授权弹窗需要用户手势）
+      // 切到详情模式：这次点击本身就是用户手势，可以顺势申请权限
       if (mode === 'detail') {
-        const ok = await requestFetchAccess();
-        if (ok) {
-          ensureDescriptions(currentGroup());
-        } else {
-          toast('未授权访问网站，详情模式只显示手动填写的说明');
-        }
+        const ok = await enableDescriptionsNow();
+        if (!ok) toast('没拿到网站访问权限，简介会先用标题和域名兜底');
       }
     });
   });
@@ -310,6 +392,7 @@ export function bindSettings() {
   $$('#syncSeg button').forEach((btn) => {
     btn.addEventListener('click', () => setSyncMode(btn.dataset.val));
   });
+  $('#btnSyncPull')?.addEventListener('click', pullFromRemote);
 
   $('#btnExport').addEventListener('click', exportData);
   $('#btnImport').addEventListener('click', () => $('#fileImport').click());
@@ -324,6 +407,12 @@ export function bindSettings() {
     if (state.data.settings.theme === 'auto') applyTheme();
   });
 
+  // 强调色：预设色块在 renderAccentUI 里逐个挂事件；这里只挂自定义取色器。
+  // 用 change 不用 input：拖动取色器会连发几十次，每次都写 storage 太浪费。
+  $('#accentPicker').addEventListener('change', (e) => setAccent(e.target.value));
+
+  bindDescNote();
+  bindBookmarkImport();
   renderHotkeys();
   bindHotkeys();
 }
@@ -348,7 +437,7 @@ function renderHotkeys() {
     btn.type = 'button';
     btn.className = 'hotkey-btn';
     const keys = getHotkeys(def.id);
-    btn.textContent = keys.length ? keys.join(' 或 ') : '（未绑定）';
+    btn.textContent = keys.length ? keys.map(displayHotkey).join(' 或 ') : '（未绑定）';
     btn.dataset.actionId = def.id;
     btn.dataset.defaultKeys = def.default.join(',');
 
@@ -367,7 +456,7 @@ function startRecording(actionId, btn) {
     if (oldBtn) {
       const def = HOTKEY_DEFS.find((d) => d.id === recordingActionId);
       const keys = getHotkeys(recordingActionId);
-      oldBtn.textContent = keys.length ? keys.join(' 或 ') : '（未绑定）';
+      oldBtn.textContent = keys.length ? keys.map(displayHotkey).join(' 或 ') : '（未绑定）';
     }
   }
   recordingActionId = actionId;
@@ -386,7 +475,7 @@ function onRecordKey(e) {
     const btn = $(`#hotkeyList .hotkey-btn[data-action-id="${recordingActionId}"]`);
     if (btn) {
       const keys = getHotkeys(recordingActionId);
-      btn.textContent = keys.length ? keys.join(' 或 ') : '（未绑定）';
+      btn.textContent = keys.length ? keys.map(displayHotkey).join(' 或 ') : '（未绑定）';
       btn.classList.remove('recording');
     }
     recordingActionId = null;
@@ -422,7 +511,7 @@ function onRecordKey(e) {
     const btn = $(`#hotkeyList .hotkey-btn[data-action-id="${recordingActionId}"]`);
     if (btn) {
       const keys = getHotkeys(recordingActionId);
-      btn.textContent = keys.length ? keys.join(' 或 ') : '（未绑定）';
+      btn.textContent = keys.length ? keys.map(displayHotkey).join(' 或 ') : '（未绑定）';
       btn.classList.remove('recording');
     }
     recordingActionId = null;
@@ -433,7 +522,7 @@ function onRecordKey(e) {
   setHotkey(recordingActionId, keyStr);
   persist();
   const btn = $(`#hotkeyList .hotkey-btn[data-action-id="${recordingActionId}"]`);
-  if (btn) { btn.textContent = keyStr; btn.classList.remove('recording'); }
+  if (btn) { btn.textContent = displayHotkey(keyStr); btn.classList.remove('recording'); }
   toast(`已设置为 ${keyStr}`);
   recordingActionId = null;
 }
@@ -456,7 +545,7 @@ export function renderHelpDialog(version) {
     const keys = getHotkeys(def.id);
     const row = document.createElement('div');
     row.className = 'hk-help-row';
-    row.innerHTML = `<span class="hk-help-label">${def.label}</span><span class="hk-help-keys">${keys.length ? keys.join(' / ') : '（未绑定）'}</span>`;
+    row.innerHTML = `<span class="hk-help-label">${def.label}</span><span class="hk-help-keys">${keys.length ? keys.map(displayHotkey).join(' / ') : '（未绑定）'}</span>`;
     helpBody.append(row);
   }
 }

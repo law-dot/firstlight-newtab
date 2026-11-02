@@ -12,6 +12,13 @@
   --glow-strong: rgba(124, 108, 246, 0.72);
   --shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
   --radius: 16px;
+  /* 原生下拉列表（select 展开的那一层）的底色。必须不透明：
+     半透明会让桌面壁纸透上来，列表看着是花的。 */
+  --menu: #23262e;
+  /* 让浏览器用深色渲染原生控件（下拉列表、滚动条、插入光标）。
+     不写这一条，Windows 上 select 展开永远是白底，而 option 的文字
+     继承了 --text（近白）→ 白底白字，只有鼠标悬停那一项被系统高亮才看得见。 */
+  color-scheme: dark;
 }
 
 html[data-theme="light"] {
@@ -26,6 +33,8 @@ html[data-theme="light"] {
   --glow: rgba(124, 108, 246, 0.34);
   --glow-strong: rgba(124, 108, 246, 0.5);
   --shadow: 0 18px 44px rgba(30, 40, 60, 0.16);
+  --menu: #ffffff;
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -381,7 +390,15 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   background-repeat: no-repeat;
 }
 
-.engine option { color: #111; background: #fff; }
+/* 原生下拉展开的那一层：color-scheme 决定系统怎么画列表和悬停高亮，
+   下面这条是给不跟随 color-scheme 的环境兜底，两边都写才稳。
+   文字跟随主题（深色下浅字、浅色下深字），因为深灰底上放黑字看不清。 */
+.field select option,
+.dlg select option,
+.engine option {
+  background: var(--menu);
+  color: var(--text);
+}
 
 .search input {
   flex: 1;
@@ -792,6 +809,56 @@ body.side-collapsed .side-rail { display: inline-flex; }
   align-content: start;
 }
 
+/* 简介入口：只在用户真的滚到卡片时才出现，不在首屏弹权限窗 */
+.grid-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px 7px 12px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--stroke);
+  font-size: 12px;
+  color: var(--muted);
+  animation: noteIn 0.28s ease both;
+}
+
+.grid-note[hidden] { display: none; }
+
+.grid-note .btn.small { flex: none; }
+
+/* 首启动引导条：比「自动填写简介」那条更重，说明的是「这些不是你的网站」 */
+.grid-note.import-note {
+  padding: 10px 10px 10px 14px;
+  font-size: 13px;
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--stroke));
+}
+
+.grid-note.import-note .grid-note-text { flex: 1; min-width: 0; }
+.grid-note.import-note b { font-weight: 600; }
+
+.grid-note-x {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.grid-note-x:hover { background: var(--card-hover); color: var(--text); }
+
+@keyframes noteIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
 .grid::-webkit-scrollbar { width: 6px; }
 .grid::-webkit-scrollbar-thumb {
   background: var(--stroke);
@@ -893,6 +960,35 @@ body.editing .card:hover .acts { opacity: 1; }
 
 .mini:hover { background: var(--accent); }
 
+.card.import {
+  border: 1px dashed var(--stroke);
+  background: transparent;
+  color: var(--muted);
+  gap: 5px;
+  font-size: 12px;
+  backdrop-filter: none;
+  font-family: inherit;
+}
+
+.card.import .imp-ico {
+  font-size: 19px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.card.import .imp-label {
+  max-width: 92%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card.import:hover {
+  color: var(--text);
+  border-color: var(--text);
+  background: var(--card);
+}
+
 .card.add {
   border: 1px dashed var(--stroke);
   background: transparent;
@@ -912,12 +1008,7 @@ body.editing .card:hover .acts { opacity: 1; }
    --site-min：卡片最小宽度（由卡片模式决定：简洁 < 标准 < 详情）
    --site-rows：卡片高度（模式定基准，布局密度再调）
    --grid-gap：行列间距（由布局密度决定：紧凑 6 / 标准 14 / 宽松 30） */
-body.site-minimal { --site-min: 72px; --site-rows: 88px; }
 body.site-detail { --site-min: 208px; --site-rows: 128px; }
-
-body.site-minimal .card .name {
-  display: none;
-}
 
 body.site-detail .card {
   gap: 6px;
@@ -925,11 +1016,9 @@ body.site-detail .card {
 }
 
 body.layout-compact { --grid-gap: 6px; --site-rows: 84px; }
-body.layout-compact.site-minimal { --site-rows: 70px; }
 body.layout-compact.site-detail { --site-rows: 108px; }
 
 body.layout-comfortable { --grid-gap: 30px; --site-rows: 132px; }
-body.layout-comfortable.site-minimal { --site-rows: 110px; }
 body.layout-comfortable.site-detail { --site-rows: 158px; }
 
 .card .desc {
@@ -1511,6 +1600,48 @@ input[type="range"] {
   color: var(--muted);
 }
 
+/* ---------- 收藏夹导入预览 ---------- */
+.import-dlg { width: 440px; }
+
+.import-dlg .hint { margin: 8px 0 0; }
+
+.import-list {
+  margin-top: 12px;
+  max-height: 46vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.import-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.import-row:hover { background: var(--card-hover); }
+
+.import-row input { width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+
+.import-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-count {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
 .dlg-acts {
   display: flex;
   justify-content: flex-end;
@@ -1780,6 +1911,9 @@ input[type="range"] {
   font-size: 12px;
 }
 
+/* 同步面板里的「以云端为准」，与上方提示留出间距 */
+#btnSyncPull { margin-top: 8px; }
+
 /* ---------- 提示条 ---------- */
 .toast {
   position: fixed;
@@ -1801,6 +1935,28 @@ input[type="range"] {
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+/* 带「撤销」按钮的提示：导错了能一键回滚，小白才敢点 */
+.toast.show:has(.toast-act) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  pointer-events: auto;
+}
+
+.toast-act {
+  flex: none;
+  padding: 2px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.toast-act:hover { background: rgba(255, 255, 255, 0.16); }
 
 /* ---------- Dock ---------- */
 .dock {

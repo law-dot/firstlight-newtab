@@ -4,7 +4,8 @@ import { loadData, uid } from './core/store.js';
 import { state, persist } from './core/state.js';
 import { initSync } from './core/sync.js';
 import { $, toast, escapeHtml } from './core/utils.js';
-import { refreshFeeds, aggregate, hasFetchAccess, requestFetchAccess } from './features/feed.js';
+import { refreshFeeds, aggregate } from './features/feed.js';
+import { hasFetchAccess, requestFetchAccess } from './core/permissions.js';
 
 let cache = {};
 let filter = 'all';
@@ -119,10 +120,10 @@ function renderChips() {
     feeds
       .map(
         (f) => `
-      <button class="chip${filter === f.id ? ' on' : ''}" data-id="${f.id}" title="${escapeHtml(f.url)}">
+      <button class="chip${filter === f.id ? ' on' : ''}" data-id="${escapeHtml(f.id)}" title="${escapeHtml(f.url)}">
         ${cache[f.id]?.error ? '<i class="dot" title="最近拉取失败"></i>' : ''}
         <span>${escapeHtml(f.title || '拉取中…')}</span>
-        <i class="x" data-del="${f.id}" title="删除该源">×</i>
+        <i class="x" data-del="${escapeHtml(f.id)}" title="删除该源">×</i>
       </button>`
       )
       .join('') +
