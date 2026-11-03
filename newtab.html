@@ -103,6 +103,10 @@
           <div class="todo-cal-day" id="todoCalDay"></div>
           <div class="todo-cal-wk" id="todoCalWk"></div>
           <div class="todo-cal-lunar" id="todoCalLunar"></div>
+          <div class="todo-cal-feeds" id="todoCalFeeds" hidden>
+            <ul class="todo-cal-feed-list" id="todoCalFeedList"></ul>
+            <button class="todo-cal-feed-more" id="todoCalFeedMore" type="button" hidden></button>
+          </div>
         </div>
         <div class="todo-scroll">
           <ul class="todo-timeline" id="todoTimeline" hidden></ul>
@@ -225,7 +229,14 @@
     <section class="field">
       <label>天气</label>
       <input id="weatherCity" placeholder="城市，如 上海 / Beijing（留空按 IP 自动定位）">
-      <p class="hint">每 2 小时自动更新一次；点起始页右上角的天气卡片可立即刷新。</p>
+      <label class="sub">接口源</label>
+      <select id="weatherSource">
+        <option value="open-meteo">Open-Meteo（推荐 · 免 key）</option>
+        <option value="wttr">wttr.in（老源）</option>
+        <option value="custom">自定义接口</option>
+      </select>
+      <input id="customWeatherUrl" class="cond" data-show-for="custom" placeholder="https://your.api.com/weather?city={city}（{city} 会被替换）">
+      <p class="hint">换了源或城市后会立即刷新；某源挂了就换另一个，不用自己找代理。</p>
     </section>
 
     <section class="field">

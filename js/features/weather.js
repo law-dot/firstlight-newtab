@@ -4,6 +4,49 @@ import { $, fetchWithTimeout, toast } from '../core/utils.js';
 
 export const WEATHER_TTL = 2 * 60 * 60 * 1000;
 
+// 内置天气源：用户在设置里选，选错了就等失败让他换，不做自动比对切换
+export const WEATHER_SOURCES = [
+  { id: 'open-meteo', name: 'Open-Meteo（推荐）', hint: '开源、免 key、国内直连稳定' },
+  { id: 'wttr', name: 'wttr.in', hint: '老源，当前被阻断时会失败' },
+  { id: 'custom', name: '自定义接口', hint: '自己填 URL，可用 {city} 占位' }
+];
+
+/* ---------- 码表 ----------
+   WX_CODES 是 wttr.in 用的 WWO 码（113/116/...），后面渲染全靠它。
+   Open-Meteo 用的是 WMO 码（0-99），需要一张映射表转到 WWO。 */
+
+// WMO → [WWO code]，一个 WMO 可能对应多个 WWO 分级，这里取最常见的那个
+const WMO_TO_WWO = {
+  0: 113,   // 晴
+  1: 113,   // 主要晴朗
+  2: 116,   // 多云
+  3: 119,   // 阴
+  45: 143,  // 雾
+  48: 248,  // 冻雾
+  51: 263,  // 小毛毛雨
+  53: 266,  // 毛毛雨
+  55: 266,  // 大毛毛雨（合并）
+  56: 263,  // 冻毛毛雨轻
+  57: 182,  // 冻毛毛雨重 → 雨夹雪
+  61: 293,  // 小雨
+  63: 299,  // 中雨
+  65: 305,  // 大雨
+  66: 176,  // 冻雨轻 → 局部有雨
+  67: 179,  // 冻雨重 → 局部雨夹雪
+  71: 323,  // 小雪
+  73: 329,  // 中雪
+  75: 335,  // 大雪
+  77: 350,  // 雪粒
+  80: 353,  // 小阵雨
+  81: 356,  // 阵雨
+  82: 359,  // 暴雨
+  85: 368,  // 小阵雪
+  86: 371,  // 阵雪
+  95: 200,  // 雷阵雨
+  96: 386,  // 雷阵雨伴冰雹
+  99: 389   // 雷伴强冰雹
+};
+
 // WWO 天气代码 → [中文描述, 图标类型, 动效标识]
 // 第三项是动效用的：'rain:0..3' 小雨→雷阵雨，'snow:0..3' 小雪→雨夹雪，
 // 'partly' = 多云（晴与阴的叠加，见 renderPartly），其余是整类。
@@ -87,9 +130,47 @@ export function bindWeather() {
   $('#weatherCity').addEventListener('change', (e) => {
     state.data.settings.weatherCity = e.target.value.trim();
     state.data.settings.weather = null;
+    state.data.settings._lastLat = null;  // 换了城市，清掉 geocode 缓存
+    state.data.settings._lastLon = null;
     persist();
     refreshWeather(true);
   });
+
+  const srcSel = $('#weatherSource');
+  const customUrl = $('#customWeatherUrl');
+
+  const syncCustomVisible = () => {
+    if (!customUrl) return;
+    customUrl.style.display = srcSel?.value === 'custom' ? '' : 'none';
+  };
+
+  if (srcSel) {
+    srcSel.value = state.data.settings.weatherSource || 'open-meteo';
+    syncCustomVisible();
+    srcSel.addEventListener('change', () => {
+      state.data.settings.weatherSource = srcSel.value;
+      state.data.settings.weather = null;  // 换源后清缓存，强制立即拉新
+      persist();
+      syncCustomVisible();
+      if (srcSel.value === 'custom' && !customUrl?.value) {
+        toast('请填写自定义接口 URL');
+        return;
+      }
+      refreshWeather(true);
+    });
+  }
+
+  if (customUrl) {
+    customUrl.value = state.data.settings.customWeatherUrl || '';
+    customUrl.addEventListener('change', (e) => {
+      state.data.settings.customWeatherUrl = e.target.value.trim();
+      persist();
+      if (state.data.settings.weatherSource === 'custom') {
+        state.data.settings.weather = null;
+        refreshWeather(true);
+      }
+    });
+  }
 
   // 电池状态：不充电时降频 + 减粒子，笔记本能明显少发热
   watchMotionPref();
@@ -102,37 +183,19 @@ export async function refreshWeather(force = false) {
     return;
   }
 
+  const src = state.data.settings.weatherSource || 'open-meteo';
   const city = (state.data.settings.weatherCity || '').trim();
-  const url = city
-    ? `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`
-    : 'https://wttr.in/?format=j1&lang=zh';
 
   try {
-    const res = await fetchWithTimeout(url, 12000);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const cur = json.current_condition?.[0] || {};
-    const area = json.nearest_area?.[0] || {};
-    const today = json.weather?.[0] || {};
-    const next = {
-      fetchedAt: Date.now(),
-      city: city || area.areaName?.[0]?.value || '本地',
-      temp: Number(cur.temp_C),
-      code: Number(cur.weatherCode),
-      desc: cur.lang_zh?.[0]?.value || cur.weatherDesc?.[0]?.value || '',
-      feels: Number(cur.FeelsLikeC),
-      humidity: Number(cur.humidity),
-      wind: Number(cur.windspeedKmph),
-      // 风向是「来向」（0 = 北）。动效里要 +180° 才是流向，换算写在 windVec() 里
-      windDir: Number(cur.winddirDegree),
-      high: Number(today.maxtempC),
-      low: Number(today.mintempC)
-    };
+    const next = await (src === 'open-meteo' ? fetchOpenMeteo(city)
+                    : src === 'custom'      ? fetchCustom(city)
+                    : /* wttr */              fetchWttr(city));
     state.data.settings.weather = next;
+    state.data.settings.weatherSource = src;  // 记录实际用的源
     persist();
     renderWeather(next, false);
   } catch (err) {
-    console.warn('天气获取失败', err);
+    console.warn('天气获取失败 [' + src + ']', err);
     if (cached) {
       renderWeather(cached, true);
     } else {
@@ -142,9 +205,133 @@ export async function refreshWeather(force = false) {
       $('#wxCity').textContent = '点击重试';
       $('#wxRange').textContent = '';
       $('#weather').classList.remove('is-stale');
-      $('#weather').title = '天气获取失败，点击重试';
+      $('#weather').title = `天气源 [${src}] 获取失败，换一个试试`;
     }
   }
+}
+
+/* ---------- fetcher 三选一 ----------
+   每个 fetcher 返回统一的 weather 对象，renderWeather 完全不关心来源。 */
+
+async function fetchWttr(city) {
+  const url = city
+    ? `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`
+    : 'https://wttr.in/?format=j1&lang=zh';
+  const res = await fetchWithTimeout(url, 12000);
+  if (!res.ok) throw new Error(`wttr HTTP ${res.status}`);
+  const json = await res.json();
+  const cur = json.current_condition?.[0] || {};
+  const area = json.nearest_area?.[0] || {};
+  const today = json.weather?.[0] || {};
+  return {
+    fetchedAt: Date.now(),
+    city: city || area.areaName?.[0]?.value || '本地',
+    temp: Number(cur.temp_C),
+    code: Number(cur.weatherCode),
+    desc: cur.lang_zh?.[0]?.value || cur.weatherDesc?.[0]?.value || '',
+    feels: Number(cur.FeelsLikeC),
+    humidity: Number(cur.humidity),
+    wind: Number(cur.windspeedKmph),
+    windDir: Number(cur.winddirDegree),
+    high: Number(today.maxtempC),
+    low: Number(today.mintempC)
+  };
+}
+
+async function fetchOpenMeteo(city) {
+  // 用 Open-Meteo 自带的免费 geocoding 拿坐标；未填城市就用浏览器默认
+  let lat = state.data.settings._lastLat;
+  let lon = state.data.settings._lastLon;
+  let resolvedCity = city;
+  let tz = 'Asia/Shanghai';
+
+  if (city) {
+    const gRes = await fetchWithTimeout(
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`,
+      10000
+    );
+    if (!gRes.ok) throw new Error(`Open-Meteo geocode HTTP ${gRes.status}`);
+    const gJson = await gRes.json();
+    const hit = gJson.results?.[0];
+    if (!hit) throw new Error(`找不到城市「${city}」`);
+    lat = hit.latitude;
+    lon = hit.longitude;
+    resolvedCity = hit.name;
+    tz = hit.timezone || 'Asia/Shanghai';
+    // 记住，下次同城市跳过 geocoding
+    state.data.settings._lastLat = lat;
+    state.data.settings._lastLon = lon;
+  } else if (!lat || !lon) {
+    // 首次无缓存：用浏览器 geolocation（不支持或用户拒绝就默认北京）
+    const pos = await new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+        () => resolve(null),
+        { timeout: 6000 }
+      );
+    }).catch(() => null);
+    if (pos) { lat = pos.lat; lon = pos.lon; resolvedCity = '当前位置'; }
+    else { lat = 39.9042; lon = 116.4074; resolvedCity = '北京'; }
+  }
+
+  const u = `https://api.open-meteo.com/v1/forecast`
+    + `?latitude=${lat}&longitude=${lon}`
+    + `&current=temperature_2m,weather_code,wind_speed_10m,wind_direction_10m,relative_humidity_2m,apparent_temperature`
+    + `&daily=temperature_2m_max,temperature_2m_min`
+    + `&timezone=${encodeURIComponent(tz)}`;
+  const res = await fetchWithTimeout(u, 12000);
+  if (!res.ok) throw new Error(`Open-Meteo forecast HTTP ${res.status}`);
+  const j = await res.json();
+  const cur = j.current || {};
+  const daily = j.daily || {};
+
+  const wmoCode = Number(cur.weather_code);
+  const wwoCode = WMO_TO_WWO[wmoCode] ?? wmoCode;
+  // 用 WWO 码查描述（Open-Meteo 本身不给中文）
+  const mapped = WX_CODES[wwoCode];
+
+  return {
+    fetchedAt: Date.now(),
+    city: resolvedCity,
+    temp: Number(cur.temperature_2m),
+    code: wwoCode,
+    desc: mapped?.[0] || '',
+    feels: Number(cur.apparent_temperature),
+    humidity: Number(cur.relative_humidity_2m),
+    wind: Number(cur.wind_speed_10m),
+    windDir: Number(cur.wind_direction_10m),
+    high: Number(daily.temperature_2m_max?.[0]),
+    low: Number(daily.temperature_2m_min?.[0])
+  };
+}
+
+// 自定义接口：URL 支持 {city} 占位；返回 JSON 结构交给用户自己对上 wttr 的字段
+// 用户必须返回这些顶层字段：temp, code(WWO), desc, feels, humidity, wind, windDir, high, low, city
+async function fetchCustom(city) {
+  const url = (state.data.settings.customWeatherUrl || '')
+    .replace('{city}', encodeURIComponent(city || ''));
+  if (!url) throw new Error('自定义接口 URL 未填写');
+  const res = await fetchWithTimeout(url, 12000);
+  if (!res.ok) throw new Error(`自定义接口 HTTP ${res.status}`);
+  const j = await res.json();
+  // 支持用户自定义接口的响应直接贴 wttr 结构或扁平键
+  const cur = j.current_condition?.[0] || j.current || j;
+  const area = j.nearest_area?.[0] || {};
+  const today = j.weather?.[0] || j.daily || {};
+  return {
+    fetchedAt: Date.now(),
+    city: city || area.areaName?.[0]?.value || j.city || '本地',
+    temp: Number(cur.temp_C ?? cur.temperature_2m ?? cur.temp),
+    code: Number(cur.weatherCode ?? cur.weather_code ?? cur.code),
+    desc: cur.lang_zh?.[0]?.value || cur.weatherDesc?.[0]?.value || cur.description || '',
+    feels: Number(cur.FeelsLikeC ?? cur.apparent_temperature ?? cur.feels),
+    humidity: Number(cur.humidity ?? cur.relative_humidity_2m),
+    wind: Number(cur.windspeedKmph ?? cur.wind_speed_10m ?? cur.wind),
+    windDir: Number(cur.winddirDegree ?? cur.wind_direction_10m ?? cur.windDir),
+    high: Number(today.maxtempC ?? today.temperature_2m_max?.[0] ?? today.high),
+    low: Number(today.mintempC ?? today.temperature_2m_min?.[0] ?? today.low)
+  };
 }
 
 export function renderWeather(w, stale) {

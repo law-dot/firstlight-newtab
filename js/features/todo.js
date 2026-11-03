@@ -34,7 +34,8 @@ export function closeTodo() {
 const WEEKDAYS = '日一二三四五六';
 
 // 撕页日历卡：年月 / 大日期 / 星期 / 农历，双休日红字（老挂历的规矩）
-function renderCalCard() {
+// 底部「订阅边注」：今日订阅事件最多列 2 条，超出显示 +N；点击跳到时间轴对应项
+function renderCalCard(events = []) {
   const now = new Date();
   $('#todoCalYm').textContent = `${now.getFullYear()} 年 ${now.getMonth() + 1} 月`;
   $('#todoCalDay').textContent = String(now.getDate());
@@ -49,14 +50,60 @@ function renderCalCard() {
   } else {
     lunarEl.hidden = true;
   }
+
+  // 订阅边注：只做索引，完整信息（时间 / 标题 / 来源 / 地点）留在时间轴
+  const MAX_NOTE = 2;
+  const feeds = events.filter((e) => e.kind === 'feed-event');
+  const box = $('#todoCalFeeds');
+  const list = $('#todoCalFeedList');
+  const more = $('#todoCalFeedMore');
+  list.textContent = '';
+  box.hidden = feeds.length === 0;
+  if (!feeds.length) return;
+
+  feeds.slice(0, MAX_NOTE).forEach((ev) => {
+    const li = document.createElement('li');
+    li.dataset.idx = String(events.indexOf(ev));
+    li.title = [ev.feedName || '订阅', ev.time || '全天', ev.text, ev.location].filter(Boolean).join(' · ');
+
+    const dot = document.createElement('i');
+    dot.className = 'dot';
+    dot.style.background = ev.color || '#888';
+
+    const time = document.createElement('span');
+    time.className = 't';
+    time.textContent = ev.time || '全天';
+
+    const name = document.createElement('span');
+    name.className = 'n';
+    name.textContent = ev.text;
+
+    li.append(dot, time, name);
+    li.onclick = () => jumpToTimeline(Number(li.dataset.idx));
+    list.append(li);
+  });
+
+  const extra = feeds.length - MAX_NOTE;
+  more.hidden = extra <= 0;
+  if (extra > 0) {
+    more.textContent = `+${extra} 条`;
+    more.onclick = () => jumpToTimeline(events.indexOf(feeds[MAX_NOTE]));
+  }
+}
+
+// 从日历卡跳到时间轴对应项并闪一下
+function jumpToTimeline(idx) {
+  const li = document.querySelectorAll('#todoTimeline li')[idx];
+  if (!li) return;
+  li.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  li.classList.add('flash');
+  setTimeout(() => li.classList.remove('flash'), 1200);
 }
 
 export function renderTodo() {
-  renderCalCard();
-
-  // 时间轴：今日日程
   const items = todayItems();
   const events = items.events;
+  renderCalCard(events);
   const timeline = $('#todoTimeline');
   timeline.textContent = '';
   timeline.hidden = events.length === 0;

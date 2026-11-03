@@ -74,6 +74,8 @@ export function makeDefault() {
       onlineSource: 'auto',
       customWallpaperUrl: '',
       weatherCity: '',
+      weatherSource: 'open-meteo',  // wttr | open-meteo | custom
+      customWeatherUrl: '',         // 用户填的自定义 URL（支持 {city} 占位）
       weather: null,
       idleMinutes: 10,
       idleTicker: true,

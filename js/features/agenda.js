@@ -1,6 +1,7 @@
 // 日程与待办的统一读取入口。
 // 今日面板和大日历都从这里取数；ICS 订阅源也在这里汇入，渲染层零改动。
 import { state } from '../core/state.js';
+import { expandOccurrences } from './ics.js';
 
 export function isoOf(d) {
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -10,17 +11,43 @@ export function isoOf(d) {
 
 export function todayIso() { return isoOf(new Date()); }
 
+function addDaysIso(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + n);
+  return isoOf(dt);
+}
+
 /* ---------- 订阅源 ---------- */
 
-function listFeedItems() {
-  const all = [];
+// RRULE 展开结果缓存：键是 item 对象本身，同步后 items 被整体替换，缓存自然失效
+const occCache = new WeakMap();
+const CACHE_BACK_DAYS = 730;   // 往前 2 年（覆盖大日历回顾）
+const CACHE_FWD_DAYS = 1095;   // 往后 3 年
+
+function occursOn(item, iso) {
+  if (!item.rrule) return item.date === iso;
+  let set = occCache.get(item);
+  if (!set) {
+    const today = todayIso();
+    set = new Set(expandOccurrences(item, addDaysIso(today, -CACHE_BACK_DAYS), addDaysIso(today, CACHE_FWD_DAYS)));
+    occCache.set(item, set);
+  }
+  if (set.has(iso)) return true;
+  // 缓存窗口之外：只针对查询日现算，避免为远期日期重建整段
+  return expandOccurrences(item, iso, iso).includes(iso);
+}
+
+function feedItemsOf(iso) {
+  const out = [];
   for (const f of (state.data.feeds || [])) {
     if (!f || !Array.isArray(f.items)) continue;
     for (const it of f.items) {
-      all.push({ ...it, kind: 'feed-event', feedId: f.id, feedName: f.name, color: f.color });
+      if (!occursOn(it, iso)) continue;
+      out.push({ ...it, kind: 'feed-event', feedId: f.id, feedName: f.name, color: f.color });
     }
   }
-  return all;
+  return out;
 }
 
 /* ---------- 基础读取 ---------- */
@@ -50,8 +77,7 @@ function visibleTodos(today = todayIso()) {
 
 // 某天的所有「日程」（本地 + 订阅），按时间升序
 export function eventsOf(iso) {
-  const feeds = listFeedItems()
-    .filter((i) => i.date === iso)
+  const feeds = feedItemsOf(iso)
     .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
   return [...localEventsOf(iso), ...feeds];
 }
