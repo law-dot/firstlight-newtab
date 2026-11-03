@@ -10,6 +10,7 @@ backups/
 
 # 开发草稿（不随仓库分发）
 weather-demo.html
+server.py
 
 # 依赖（本项目零依赖，留作兜底）
 node_modules/

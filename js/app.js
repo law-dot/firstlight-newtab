@@ -17,19 +17,20 @@ import {
 import { pomo, bindPomodoro } from './features/pomodoro.js';
 import { bindCalendar } from './features/calendar.js';
 import { renderTodo, applyTodoMode, closeTodo, bindTodo } from './features/todo.js';
+import { setupFeedAlarm, syncAll as syncAllFeeds } from './features/calfeed.js';
 import { updateIdleTicker } from './features/feed.js';
 import { renderDock, applyDockMode, bindDock } from './features/dock.js';
 import {
   buildSwatches, applyWallpaper, checkOnlineRefresh, bindWallpaper, restartOnlineInterval
 } from './features/wallpaper.js';
 import {
-  renderTabs, renderGrid, applySideState, applySiteMode, applyLayout,
+  renderTabs, renderGrid, applySideState, applySiteMode, applyLayout, applyViewMode,
   bindSidebar, bindSidePeek
 } from './features/sidebar.js';
 import {
   applyTheme, syncSettingsUI, openDrawer, closeDrawer,
   bindSettings, bindDrawerAutoClose, bindEdgeSettings,
-  bindHelpDialog, openHelpDialog
+  bindHelpDialog, openHelpDialog, bindFeedSettings, renderFeedList
 } from './features/settings.js';
 
 /* ================= 启动 ================= */
@@ -101,6 +102,7 @@ function bind() {
   bindDock();
   bindTodo();
   bindSettings();
+  bindFeedSettings();
   bindHelpDialog(VERSION);
   bindWallpaper();
   bindWeather();
@@ -109,6 +111,12 @@ function bind() {
   bindGlobal();
   // 系统「减少动态效果」变化 + 电池供电降频，只在这里接一次
   watchMotionPref();
+
+  // 日历订阅定时同步（每天一次），有订阅源才启动
+  setupFeedAlarm();
+  if ((state.data.feeds || []).length > 0) {
+    syncAllFeeds(); // 首次打开新标签页尝试刷新一次（需要用户同意 optional_host_permissions）
+  }
 
   // 首次使用自动弹出说明（showOnboarding 默认 true，关掉后不再弹）
   if (state.data.settings.showOnboarding) {
@@ -134,12 +142,13 @@ export const IS_MAC = (() => {
 
 export const MOD_LABEL = IS_MAC ? '⌘' : 'Ctrl';
 
-/* 快捷键注册表：4 个动作，每个可绑多个快捷键（数组），空数组=禁用
+/* 快捷键注册表：5 个动作，每个可绑多个快捷键（数组），空数组=禁用
    统一用 Mod 表示「当前平台的命令键」：mac 是 Cmd，Windows/Linux 是 Ctrl。
    写死 Meta 会导致 Windows 上三个快捷键全部失效（v1.0 的实际 bug）。 */
 export const HOTKEY_DEFS = [
   { id: 'search', label: '聚焦搜索框', default: ['/', 'Mod+K'] },
   { id: 'edit',   label: '切换编辑模式', default: ['Mod+E'] },
+  { id: 'view',   label: '切换极简视图', default: ['Mod+Shift+M'] },
   { id: 'drawer', label: '打开设置抽屉', default: ['Mod+,'] },
   { id: 'escape', label: '关闭抽屉/对话框', default: ['Escape'] }
 ];
@@ -211,6 +220,15 @@ export function resetHotkey(actionId) {
   s.hotkeys[actionId] = def ? def.default.slice() : [];
 }
 
+/* 两档视图循环切换：standard ↔ minimal */
+function toggleViewMode() {
+  const s = state.data.settings;
+  s.viewMode = s.viewMode === 'minimal' ? 'standard' : 'minimal';
+  persist();
+  applyViewMode();
+  toast(s.viewMode === 'minimal' ? '极简视图：已隐藏收藏卡片' : '标准视图');
+}
+
 function bindGlobal() {
   $('#btnEdit').addEventListener('click', () => {
     state.editMode = !state.editMode;
@@ -221,6 +239,8 @@ function bindGlobal() {
     renderDock();
     toast(state.editMode ? '编辑模式：可拖拽排序、增删网站与分组' : '已退出编辑模式');
   });
+
+  $('#btnView').addEventListener('click', toggleViewMode);
 
   /* 快捷键分发：读 settings.hotkeys，每个动作可绑多个快捷键
      - 全项目**只有这一个**全局 keydown 监听器。
@@ -272,6 +292,7 @@ function bindGlobal() {
       $('#btnEdit').dispatchEvent(new MouseEvent('click', { bubbles: true }));
       return;
     }
+    if (matched === 'view') { toggleViewMode(); return; }
     if (matched === 'drawer') { openDrawer(); return; }
   });
 
@@ -358,6 +379,7 @@ export function renderAll() {
   applyDockMode();
   applySiteMode();
   applyLayout();
+  applyViewMode();
 }
 
 /* ================= 待机 ================= */

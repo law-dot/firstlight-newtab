@@ -1,7 +1,8 @@
-// 日历：点击日期触发，月历渲染 + 日程增删（存 data.events）
+// 日历：点击日期触发，月历渲染 + 日程/待办增删（存 data.events / data.todos，v1.2 起合并管理）
 import { state, persist } from '../core/state.js';
-import { $, toast } from '../core/utils.js';
+import { $, $$, toast } from '../core/utils.js';
 import { uid } from '../core/store.js';
+import { isoOf, eventsOf, todosOf } from './agenda.js';
 
 export const cal = {
   dialog: null,
@@ -44,8 +45,14 @@ export const cal = {
     $('#calAddForm').hidden = true;
     this.render();
   },
-  eventsOf(iso) {
-    return (state.data.events || []).filter((e) => e.date === iso);
+  eventsOf,
+  todosOf,
+  toggleTodo(id) {
+    const todo = (state.data.todos || []).find((t) => t.id === id);
+    if (!todo) return;
+    todo.done = !todo.done;
+    persist();
+    this.render();
   },
   render() {
     // 标题
@@ -70,7 +77,7 @@ export const cal = {
       if (d.getMonth() !== this.viewMonth) cell.classList.add('other');
       if (iso === todayIso) cell.classList.add('today');
       if (iso === this.selectedDate) cell.classList.add('selected');
-      if (this.eventsOf(iso).length) {
+      if (this.eventsOf(iso).length || this.todosOf(iso).length) {
         const dot = document.createElement('span');
         dot.className = 'dot';
         cell.append(dot);
@@ -90,26 +97,66 @@ export const cal = {
     const events = this.eventsOf(this.selectedDate)
       .slice()
       .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
-    $('#calEmpty').style.display = events.length ? 'none' : '';
+    const todos = this.todosOf(this.selectedDate);
+    $('#calEmpty').style.display = events.length || todos.length ? 'none' : '';
     events.forEach((ev) => {
       const li = document.createElement('li');
+      if (ev.kind === 'feed-event') li.classList.add('feed-item');
+
       const time = document.createElement('span');
       time.className = 'time';
       time.textContent = ev.time || '全天';
-      const text = document.createElement('span');
-      text.className = 'text';
-      text.textContent = ev.text;
-      const rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'rm';
-      rm.textContent = '×';
-      rm.title = '删除';
-      rm.addEventListener('click', (e) => {
+
+      if (ev.kind === 'feed-event') {
+        // 订阅事件：色点 + 文本 + 来源标签，无删除按钮
+        const dot = document.createElement('i');
+        dot.className = 'feed-dot';
+        dot.style.background = ev.color || '#888';
+        dot.title = ev.feedName || '订阅';
+        const text = document.createElement('span');
+        text.className = 'text';
+        text.textContent = ev.text;
+        const tag = document.createElement('span');
+        tag.className = 'feed-tag';
+        tag.textContent = ev.feedName || '订阅';
+        li.append(time, dot, text, tag);
+      } else {
+        const text = document.createElement('span');
+        text.className = 'text';
+        text.textContent = ev.text;
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'rm';
+        rm.textContent = '×';
+        rm.title = '删除';
+        rm.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.removeEvent(ev.id);
+        });
+        li.append(time, text, rm);
+      }
+      list.append(li);
+    });
+    // 待办排在日程后面：○ 复选框可直接勾选完成，完成的划线仍可见（大日历是管理视图）
+    todos.forEach((todo) => {
+      const li = document.createElement('li');
+      li.className = 'cal-todo';
+      if (todo.done) li.classList.add('done');
+      const check = document.createElement('button');
+      check.type = 'button';
+      check.className = 'check';
+      check.textContent = todo.done ? '✓' : '';
+      check.title = todo.done ? '取消完成' : '完成';
+      check.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.removeEvent(ev.id);
+        this.toggleTodo(todo.id);
       });
-      li.append(time, text, rm);
+      const text = document.createElement('span');
+      text.className = 'text';
+      text.textContent = todo.text;
+      li.append(check, text);
       list.append(li);
     });
   },
@@ -129,19 +176,27 @@ export const cal = {
     this.render();
     toast('已添加日程');
   },
+  addTodo(text) {
+    if (!this.selectedDate || !text.trim()) return;
+    state.data.todos = state.data.todos || [];
+    state.data.todos.push({
+      id: uid(),
+      date: this.selectedDate,
+      text: text.trim(),
+      done: false
+    });
+    persist();
+    $('#calAddForm').hidden = true;
+    $('#calAddText').value = '';
+    this.render();
+    toast('已添加待办');
+  },
   removeEvent(id) {
     state.data.events = (state.data.events || []).filter((e) => e.id !== id);
     persist();
     this.render();
   }
 };
-
-function isoOf(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
-}
 
 export function bindCalendar() {
   cal.dialog = $('#calDialog');
@@ -159,8 +214,17 @@ export function bindCalendar() {
   $('#calAddCancel').addEventListener('click', () => {
     $('#calAddForm').hidden = true;
   });
+  $('#calAddSeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-val]');
+    if (!btn) return;
+    $$('#calAddSeg button').forEach((b) => b.classList.toggle('on', b === btn));
+    $('#calAddTimeRow').hidden = btn.dataset.val !== 'event';
+  });
   $('#calAddForm').addEventListener('submit', (e) => {
     e.preventDefault();
-    cal.addEvent($('#calAddText').value, $('#calAddTime').value);
+    const mode = $('#calAddSeg button.on')?.dataset.val || 'event';
+    const text = $('#calAddText').value;
+    if (mode === 'todo') cal.addTodo(text);
+    else cal.addEvent(text, $('#calAddTime').value);
   });
 }

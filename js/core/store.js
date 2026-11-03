@@ -87,6 +87,7 @@ export function makeDefault() {
       showOnboarding: true,
       hotkeys: {},
       siteMode: 'detail',
+      viewMode: 'standard', // 标准 / 极简：极简只隐藏收藏卡片区 #grid
       descPromptOff: false, // 用户在卡片区关掉「自动填写简介」的入口后不再打扰
       showImportCta: true,   // 卡片区显示「导入收藏夹」入口，导入过一次就收起
       importNoteDone: false, // 首启动那条「这些是示例网站」的提示条，点过「先用示例」就不再弹
@@ -137,7 +138,8 @@ export function normalize(raw) {
   const todos = Array.isArray(raw.todos)
     ? raw.todos
         .filter((t) => t && t.text)
-        .map((t) => ({ id: t.id || uid(), text: String(t.text), done: !!t.done }))
+        // date：ISO 'YYYY-MM-DD'，'' 表示未安排日期。未完成的待办跨天累积显示，勾选完成才消失
+        .map((t) => ({ id: t.id || uid(), text: String(t.text), done: !!t.done, date: String(t.date || '') }))
     : [];
 
   const settings = { ...base.settings, ...(raw.settings || {}) };
@@ -166,6 +168,7 @@ export function normalize(raw) {
   // 详情模式是默认：图标 + 标题 + 一句简介，忘掉名字也认得出是哪个网站。
   // 旧的 'minimal' 一并归到 detail——简洁模式已在 v1.1 砍掉。
   if (!['standard', 'detail'].includes(settings.siteMode)) settings.siteMode = 'detail';
+  if (!['standard', 'minimal'].includes(settings.viewMode)) settings.viewMode = 'standard';
   if (!['compact', 'standard', 'comfortable'].includes(settings.layout)) settings.layout = 'standard';
 
   // pomodoro：补默认值 + 范围约束

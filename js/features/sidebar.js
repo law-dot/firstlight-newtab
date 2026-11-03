@@ -103,6 +103,14 @@ export function applyLayout() {
   document.body.classList.toggle('layout-comfortable', layout === 'comfortable');
 }
 
+/* 视图档位：standard 标准 / minimal 极简。极简只隐藏收藏卡片区 #grid，
+   其余（搜索、壁纸、时钟、天气、Dock、待办、侧栏）全部保留——
+   这些在设置里都能独立开关，唯独卡片区不能，所以用「模式」包装一个总开关。 */
+export function applyViewMode() {
+  const mode = state.data.settings.viewMode === 'minimal' ? 'minimal' : 'standard';
+  document.body.classList.toggle('view-minimal', mode === 'minimal');
+}
+
 export function renderGrid() {
   const grid = $('#grid');
   grid.textContent = '';

@@ -6,6 +6,9 @@
   <meta content="width=device-width, initial-scale=1" name="viewport">
   <title>初见</title>
   <link href="css/style.css" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=LXGW+WenKai+TC:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
   <div class="bg" id="bg"></div>
@@ -50,6 +53,9 @@
           <button aria-label="编辑模式" class="icon-btn" id="btnEdit" title="编辑模式">
             <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>
           </button>
+          <button aria-label="切换视图" class="icon-btn" id="btnView" title="切换极简视图">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          </button>
           <button aria-label="切换深浅色" class="icon-btn" id="btnTheme" title="切换深浅色">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/></svg>
           </button>
@@ -91,14 +97,39 @@
       </main>
 
       <aside class="todo" id="todoPanel">
-        <div class="todo-head">
-          <h2>待办</h2>
-          <span class="todo-left" id="todoLeft"></span>
+        <div class="todo-cal" id="todoCal">
+          <div class="todo-cal-rings"><i></i><i></i></div>
+          <div class="todo-cal-ym" id="todoCalYm"></div>
+          <div class="todo-cal-day" id="todoCalDay"></div>
+          <div class="todo-cal-wk" id="todoCalWk"></div>
+          <div class="todo-cal-lunar" id="todoCalLunar"></div>
         </div>
-        <form class="todo-add" id="todoForm">
-          <input id="todoInput" maxlength="80" placeholder="添加一件小事…">
+        <div class="todo-scroll">
+          <ul class="todo-timeline" id="todoTimeline" hidden></ul>
+          <div class="todo-section" id="todoSection" hidden>
+            <div class="todo-section-title">待办 <span class="todo-left" id="todoLeft"></span></div>
+            <ul class="todo-list" id="todoList"></ul>
+          </div>
+          <div class="todo-empty" id="todoEmpty" hidden>今天没有安排</div>
+        </div>
+        <button class="todo-add-btn" id="todoAddBtn" type="button">＋ 添加</button>
+        <form class="todo-add-form" hidden id="todoAddForm">
+          <div class="seg" id="todoAddSeg">
+            <button class="on" data-val="todo" type="button">待办</button>
+            <button data-val="event" type="button">日程</button>
+          </div>
+          <input id="todoAddText" maxlength="80" placeholder="要做什么" required type="text">
+          <div class="todo-add-row" id="todoAddTimeRow" hidden>
+            <input aria-label="时间" id="todoAddTime" type="time">
+          </div>
+          <div class="todo-add-row">
+            <input aria-label="日期" id="todoAddDate" type="date">
+          </div>
+          <div class="todo-add-actions">
+            <button class="btn primary small" type="submit">保存</button>
+            <button class="btn small" id="todoAddCancel" type="button">取消</button>
+          </div>
         </form>
-        <ul class="todo-list" id="todoList"></ul>
       </aside>
     </div>
   </div>
@@ -307,6 +338,19 @@
       <input accept="application/json" hidden id="fileImport" type="file">
       <p class="hint">所有数据保存在本机浏览器，不上传任何服务器。</p>
     </section>
+
+    <section class="field">
+      <label>日历订阅</label>
+      <div class="row">
+        <input class="input" id="feedUrl" placeholder="ICS 地址，如 https://calendar.google.com/calendar/ical/.../basic.ics" type="url">
+      </div>
+      <div class="row">
+        <input class="input" id="feedName" placeholder="名称（可选，默认取 URL 文件名）" type="text">
+        <button class="btn" id="btnAddFeed" type="button">添加</button>
+      </div>
+      <ul class="feed-list" id="feedList"></ul>
+      <p class="hint">支持 Google 日历、Apple 日历、Outlook 等导出的 ICS 订阅链接。每天自动刷新。</p>
+    </section>
   </aside>
 
   <dialog class="dlg" id="siteDialog">
@@ -417,14 +461,18 @@
     <div class="cal-side">
       <div class="cal-side-head">
         <div class="cal-side-date" id="calSideDate"></div>
-        <button class="btn small" id="calAddBtn" type="button">+ 日程</button>
+        <button class="btn small" id="calAddBtn" type="button">+ 添加</button>
       </div>
       <ul class="cal-events" id="calEvents"></ul>
-      <div class="cal-empty" id="calEmpty">这一天还没有日程</div>
+      <div class="cal-empty" id="calEmpty">这一天还没有安排</div>
 
       <form class="cal-add" hidden id="calAddForm">
+        <div class="seg" id="calAddSeg">
+          <button class="on" data-val="event" type="button">日程</button>
+          <button data-val="todo" type="button">待办</button>
+        </div>
         <input id="calAddText" maxlength="120" placeholder="要做什么" required type="text">
-        <div class="cal-add-row">
+        <div class="cal-add-row" id="calAddTimeRow">
           <input id="calAddTime" type="time">
           <button class="btn primary small" type="submit">保存</button>
           <button class="btn small" id="calAddCancel" type="button">取消</button>

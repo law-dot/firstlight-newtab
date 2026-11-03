@@ -39,6 +39,9 @@ html[data-theme="light"] {
 
 * { box-sizing: border-box; }
 
+/* hidden 属性优先：防止类选择器里的 display:flex/block 顶掉 UA 的 display:none */
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   margin: 0;
@@ -809,6 +812,10 @@ body.side-collapsed .side-rail { display: inline-flex; }
   align-content: start;
 }
 
+/* 极简视图：只隐藏收藏卡片区（含卡片相关的提示条），其余 UI 全部保留 */
+.view-minimal #grid,
+.view-minimal .grid-note { display: none; }
+
 /* 简介入口：只在用户真的滚到卡片时才出现，不在首屏弹权限窗 */
 .grid-note {
   display: flex;
@@ -1049,7 +1056,22 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
   border: 1px solid var(--stroke);
   backdrop-filter: blur(20px) saturate(150%);
   box-shadow: var(--shadow);
+  overflow: hidden; /* 高度钉死，超出部分交给内部滚动区 */
 }
+
+/* 日历卡与加号按钮之间的滚动区：时间轴 + 待办列表，隐藏滚动条 */
+.todo-scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* 旧 Edge */
+}
+
+.todo-scroll::-webkit-scrollbar { display: none; } /* Chromium */
 
 .todo-head {
   display: flex;
@@ -1068,7 +1090,7 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
   color: var(--muted);
 }
 
-.todo-add input,
+.todo-add-form input,
 .field input,
 .field select,
 .dlg input {
@@ -1084,14 +1106,14 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
   font-family: inherit;
 }
 
-.todo-add input:focus,
+.todo-add-form input:focus,
 .field input:focus,
 .dlg input:focus {
   border-color: var(--accent-soft);
   background: var(--card-hover);
 }
 
-.todo-add input::placeholder { color: var(--muted); }
+.todo-add-form input::placeholder { color: var(--muted); }
 
 .todo-list {
   list-style: none;
@@ -1155,6 +1177,184 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
 
 .todo-list li:hover .del { opacity: 1; }
 .todo-list .del:hover { color: var(--text); background: var(--input); }
+
+/* 今日时间轴：日程（有时间的安排） */
+.todo-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.todo-timeline li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px;
+  border-radius: 9px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.todo-timeline li:hover { background: var(--input); }
+
+.todo-timeline .time {
+  flex: none;
+  min-width: 42px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.todo-timeline .text {
+  flex: 1;
+  word-break: break-word;
+}
+
+.todo-timeline .del {
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  border-radius: 50%;
+}
+
+.todo-timeline li:hover .del { opacity: 1; }
+.todo-timeline .del:hover { color: var(--text); background: var(--input); }
+
+/* 订阅事件样式：色点 + 来源标签 */
+.todo-timeline .feed-item .text { opacity: 0.9; }
+.todo-timeline .feed-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.todo-timeline .feed-tag {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  background: var(--input);
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+
+/* 撕页日历卡：米黄纸面不随主题反色（物理材质），工作日黑字、双休日红字 */
+.todo-cal {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 16px 16px;
+  border-radius: 12px;
+  background: #F8F1DE;
+  border: 1px solid #E8DFC6;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  color: #2B2B2B;
+}
+
+.todo-cal-rings {
+  position: absolute;
+  top: 6px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 64px;
+}
+
+.todo-cal-rings i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.todo-cal-ym {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 2px;
+}
+
+.todo-cal-day {
+  font-family: 'LXGW WenKai TC', Georgia, 'Songti SC', 'STSong', serif;
+  font-size: 64px;
+  line-height: 1.1;
+  font-weight: 700;
+  color: #2B2B2B;
+}
+
+.todo-cal-day.weekend { color: #C0392B; }
+
+.todo-cal-wk { font-size: 14px; font-weight: 500; }
+
+.todo-cal-lunar {
+  margin-top: 4px;
+  font-family: 'LXGW WenKai TC', 'KaiTi', 'STKaiti', serif;
+  font-size: 13px;
+  font-weight: 400;
+  color: #C0392B;
+}
+
+/* 时间轴与待办之间的分隔标题 */
+.todo-section-title {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--stroke);
+  font-size: 11.5px;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+}
+
+.todo-empty {
+  padding: 22px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* 加号按钮与内嵌表单 */
+.todo-add-btn {
+  height: 34px;
+  border: 1px dashed var(--stroke);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.todo-add-btn:hover { color: var(--text); border-color: var(--text); }
+
+.todo-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.todo-add-form .seg button { height: 26px; font-size: 12px; }
+
+.todo-add-row input[type="time"],
+.todo-add-row input[type="date"] { width: 100%; }
+
+.todo-add-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 
 /* ---------- 设置抽屉 ---------- */
 .drawer {
@@ -1304,6 +1504,41 @@ body.drawer-open .drawer { transform: translateX(0); }
 }
 
 .btn.danger { color: #ff8080; }
+
+/* 日历订阅列表 */
+.feed-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.feed-list .feed-empty {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  padding: 8px 0;
+}
+.feed-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--input);
+}
+.feed-color {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.feed-info { flex: 1; min-width: 0; }
+.feed-name { font-size: 13px; font-weight: 500; }
+.feed-url { font-size: 10.5px; color: var(--muted); word-break: break-all; margin-top: 1px; }
+.feed-status { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.btn.small { padding: 2px 8px; height: 22px; font-size: 11.5px; line-height: 1; }
 
 .color-label {
   display: flex;
@@ -1884,6 +2119,30 @@ input[type="range"] {
 .cal-events li:hover .rm,
 .cal-events li .rm:focus-visible { opacity: 1; }
 .cal-events li .rm:hover { background: var(--input); color: var(--text); }
+
+/* 大日历侧栏里的待办：○ 复选框可勾选，完成态划线仍可见 */
+.cal-events li.cal-todo .check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--muted);
+  background: transparent;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.cal-events li.cal-todo.done .check {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.cal-events li.cal-todo.done .text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
 .cal-empty {
   padding: 18px;
   text-align: center;

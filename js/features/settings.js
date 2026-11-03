@@ -13,6 +13,9 @@ import { applyDockMode, renderDock } from './dock.js';
 import { applySiteMode, applyLayout, renderGrid } from './sidebar.js';
 import { enableDescriptionsNow, bindDescNote } from './sitedesc.js';
 import { bindBookmarkImport } from './bookmarkimport.js';
+import {
+  addFeed, removeFeed, syncFeed, listFeeds, defaultFeedName, ensureFeedPermission
+} from './calfeed.js';
 import { renderAll, HOTKEY_DEFS, normalizeHotkey, getHotkeys, displayHotkey, findHotkeyConflict, setHotkey, resetHotkey } from '../app.js';
 
 export function applyTheme() {
@@ -223,6 +226,7 @@ async function pullFromRemote() {
 export function openDrawer() {
   document.body.classList.add('drawer-open');
   $('#drawer').setAttribute('aria-hidden', 'false');
+  renderFeedList(); // 每次打开抽屉刷新订阅列表状态
 }
 
 export function closeDrawer() {
@@ -634,5 +638,89 @@ export function bindEdgeSettings() {
       state.edgeTimer = null;
       openDrawer();
     }, EDGE_DELAY);
+  });
+}
+
+/* ================= 日历订阅 ================= */
+
+export function renderFeedList() {
+  const list = $('#feedList');
+  if (!list) return;
+  list.textContent = '';
+  const feeds = listFeeds();
+  if (feeds.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'feed-empty';
+    empty.textContent = '暂无订阅';
+    list.append(empty);
+    return;
+  }
+  for (const f of feeds) {
+    const li = document.createElement('li');
+    li.className = 'feed-item';
+
+    const dot = document.createElement('i');
+    dot.className = 'feed-color';
+    dot.style.background = f.color || '#888';
+
+    const info = document.createElement('div');
+    info.className = 'feed-info';
+    const name = document.createElement('div');
+    name.className = 'feed-name';
+    name.textContent = f.name || defaultFeedName(f.url);
+    const url = document.createElement('div');
+    url.className = 'feed-url';
+    url.textContent = f.url;
+    const status = document.createElement('div');
+    status.className = 'feed-status';
+    if (f.error) status.textContent = `❌ ${f.error}`;
+    else if (f.lastSync) status.textContent = `✓ ${new Date(f.lastSync).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+    else status.textContent = '未同步';
+    info.append(name, url, status);
+
+    const syncBtn = document.createElement('button');
+    syncBtn.className = 'btn small';
+    syncBtn.type = 'button';
+    syncBtn.textContent = '刷新';
+    syncBtn.onclick = async () => {
+      toast('同步中…');
+      await syncFeed(f.id);
+      renderFeedList();
+      toast(f.error ? '同步失败' : '已同步');
+    };
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn danger small';
+    delBtn.type = 'button';
+    delBtn.textContent = '删除';
+    delBtn.onclick = () => {
+      if (confirm(`删除订阅「${f.name || defaultFeedName(f.url)}」？`)) {
+        removeFeed(f.id);
+        renderFeedList();
+      }
+    };
+
+    li.append(dot, info, syncBtn, delBtn);
+    list.append(li);
+  }
+}
+
+export function bindFeedSettings() {
+  $('#btnAddFeed').addEventListener('click', async () => {
+    const url = $('#feedUrl').value.trim();
+    const name = $('#feedName').value.trim();
+    if (!url) { toast('请输入 ICS 地址'); return; }
+    // 先请求目标域名的访问权限（扩展环境；Web 预览直接过）
+    const ok = await ensureFeedPermission(url);
+    if (!ok) { toast('未授权访问该域名'); return; }
+    const result = addFeed({ url, name });
+    if (!result.ok) { toast(result.error); return; }
+    $('#feedUrl').value = '';
+    $('#feedName').value = '';
+    toast('已添加，正在同步…');
+    renderFeedList();
+  });
+  $('#feedUrl').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $('#btnAddFeed').click();
   });
 }
