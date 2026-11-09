@@ -9,6 +9,7 @@ export const state = {
   editMode: false,
   dragSiteId: null,
   dragFromGroupId: null,
+  dragGroupId: null,        // 非 null 表示正在拖分组调序（1.2.7）
   dragDockIndex: null,      // 非 null 表示从 dock 拖出来的
   bgUrl: null,              // 当前壁纸的 objectURL
   currentCredit: '',

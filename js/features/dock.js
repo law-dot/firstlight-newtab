@@ -3,16 +3,22 @@
 // manual = 手动：编辑模式下从分组拖入置顶，支持 dock 内部拖拽排序
 // off    = 关闭
 import { state, persist } from '../core/state.js';
-import { $, hostOf, faviconOf, paintLetter, clearDropMarks, toast } from '../core/utils.js';
+import { $, hostOf, installIcon, clearDropMarks, toast } from '../core/utils.js';
 
 /* ---------- 使用统计：智能 Dock 的数据源 ---------- */
-// 卡片/ Dock 点击时调用；返回的 promise 与页面跳转赛跑（最多 80ms），尽量让计数落盘
+// 1.3.2：卡片 / Dock 点击时调用。1.2.5 起新标签页留在原地、不再被跳走，
+// 所以计数可以从容落盘（去掉原来和页面跳转赛跑的 80ms），但也因此必须
+// 主动重绘 Dock —— 页面常驻、renderDock() 只在初始化/设置/编辑时跑，
+// 不重绘的话点了卡片 stats 照涨，界面却永远停在打开时那一张快照。
 export function trackSiteUse(siteId) {
   const stats = state.data.stats || (state.data.stats = {});
   const rec = stats[siteId] || (stats[siteId] = { n: 0, last: 0 });
   rec.n += 1;
   rec.last = Date.now();
-  return Promise.race([persist(), new Promise((r) => setTimeout(r, 80))]);
+  // 微任务里重绘：让调用方同步的 window.open 先在用户手势栈里执行完，
+  // 不打断这一次点击；手动/关闭模式下统计照记，但不重建 Dock。
+  Promise.resolve().then(() => { if (isAuto()) renderDock(); });
+  return persist();
 }
 
 function isAuto() {
@@ -55,23 +61,7 @@ function makeDockIcon(site) {
 
   const ico = document.createElement('div');
   ico.className = 'ico';
-  const customIcon = site.icon || '';
-  const iconSrc = customIcon || faviconOf(site.url);
-  if (iconSrc) {
-    const img = document.createElement('img');
-    img.alt = '';
-    img.referrerPolicy = 'no-referrer';
-    img.draggable = false;
-    if (!customIcon) img.className = 'fav';
-    img.onerror = () => {
-      img.remove();
-      paintLetter(ico, site);
-    };
-    img.src = iconSrc;
-    ico.append(img);
-  } else {
-    paintLetter(ico, site);
-  }
+  installIcon(ico, site); // 与卡片共用：图标库优先 + 150ms 首字兜底
   el.append(ico);
   return el;
 }
@@ -114,9 +104,8 @@ function renderAutoDock() {
         return;
       }
       e.preventDefault();
-      trackSiteUse(site.id).finally(() => {
-        location.href = site.url;
-      });
+      trackSiteUse(site.id);
+      window.open(site.url, '_blank', 'noopener');
     });
 
     dock.append(el);
@@ -175,9 +164,8 @@ function renderManualDock() {
         return;
       }
       e.preventDefault();
-      trackSiteUse(site.id).finally(() => {
-        location.href = site.url;
-      });
+      trackSiteUse(site.id);
+      window.open(site.url, '_blank', 'noopener');
     });
 
     // 从 dock 拖出

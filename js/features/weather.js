@@ -1,6 +1,7 @@
 // 天气卡片 + 天气动效（雨雪分级 / 风耦合 / 晴天镜头光晕 / 阴天云缝 / 多云=晴+阴 / 雾霾分家）
 import { state, persist } from '../core/state.js';
 import { $, fetchWithTimeout, toast } from '../core/utils.js';
+import { locateCity } from './geo.js';
 
 export const WEATHER_TTL = 2 * 60 * 60 * 1000;
 
@@ -123,15 +124,17 @@ const DIR_NAMES = ['北', '东北', '东', '东南', '南', '西南', '西', '�
 
 export function bindWeather() {
   $('#weather').addEventListener('click', () => {
+    if (!(state.data.settings.weatherCity || '').trim()) {
+      toast('还没设置城市：右上角设置 → 天气 → 城市');
+      return;
+    }
     toast('正在刷新天气…');
     refreshWeather(true);
   });
 
   $('#weatherCity').addEventListener('change', (e) => {
     state.data.settings.weatherCity = e.target.value.trim();
-    state.data.settings.weather = null;
-    state.data.settings._lastLat = null;  // 换了城市，清掉 geocode 缓存
-    state.data.settings._lastLon = null;
+    state.data.settings.weather = null;  // 换城市清掉旧天气，强制立即重拉
     persist();
     refreshWeather(true);
   });
@@ -177,6 +180,19 @@ export function bindWeather() {
 }
 
 export async function refreshWeather(force = false) {
+  const city = (state.data.settings.weatherCity || '').trim();
+
+  // 城市留空 = 用户不要天气。不猜、不定位、不发任何请求：
+  // 卡片显示「未设置」，动效跟着 fxSync 一起停掉。
+  if (!city) {
+    if (state.data.settings.weather) {
+      state.data.settings.weather = null;
+      persist();
+    }
+    renderNoCity();
+    return;
+  }
+
   const cached = state.data.settings.weather;
   if (!force && cached?.fetchedAt && Date.now() - cached.fetchedAt < WEATHER_TTL) {
     renderWeather(cached, false);
@@ -184,7 +200,6 @@ export async function refreshWeather(force = false) {
   }
 
   const src = state.data.settings.weatherSource || 'open-meteo';
-  const city = (state.data.settings.weatherCity || '').trim();
 
   try {
     const next = await (src === 'open-meteo' ? fetchOpenMeteo(city)
@@ -239,41 +254,12 @@ async function fetchWttr(city) {
 }
 
 async function fetchOpenMeteo(city) {
-  // 用 Open-Meteo 自带的免费 geocoding 拿坐标；未填城市就用浏览器默认
-  let lat = state.data.settings._lastLat;
-  let lon = state.data.settings._lastLon;
-  let resolvedCity = city;
-  let tz = 'Asia/Shanghai';
-
-  if (city) {
-    const gRes = await fetchWithTimeout(
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`,
-      10000
-    );
-    if (!gRes.ok) throw new Error(`Open-Meteo geocode HTTP ${gRes.status}`);
-    const gJson = await gRes.json();
-    const hit = gJson.results?.[0];
-    if (!hit) throw new Error(`找不到城市「${city}」`);
-    lat = hit.latitude;
-    lon = hit.longitude;
-    resolvedCity = hit.name;
-    tz = hit.timezone || 'Asia/Shanghai';
-    // 记住，下次同城市跳过 geocoding
-    state.data.settings._lastLat = lat;
-    state.data.settings._lastLon = lon;
-  } else if (!lat || !lon) {
-    // 首次无缓存：用浏览器 geolocation（不支持或用户拒绝就默认北京）
-    const pos = await new Promise((resolve) => {
-      if (!navigator.geolocation) return resolve(null);
-      navigator.geolocation.getCurrentPosition(
-        (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
-        () => resolve(null),
-        { timeout: 6000 }
-      );
-    }).catch(() => null);
-    if (pos) { lat = pos.lat; lon = pos.lon; resolvedCity = '当前位置'; }
-    else { lat = 39.9042; lon = 116.4074; resolvedCity = '北京'; }
-  }
+  // 城市名 → 坐标。留空的情况 refreshWeather 已经挡在前面，这里 city 一定非空。
+  // 中文名走内置坐标表（离线、准），国外城市才走 Open-Meteo geocoding。
+  const hit = await locateCity(city);
+  if (!hit) throw new Error(`找不到城市「${city}」`);
+  const { lat, lon, tz } = hit;
+  const resolvedCity = hit.name;
 
   const u = `https://api.open-meteo.com/v1/forecast`
     + `?latitude=${lat}&longitude=${lon}`
@@ -363,6 +349,31 @@ export function renderWeather(w, stale) {
   fxSync();
 }
 
+/* 城市留空：什么都不取 —— 不发请求、不按 IP 猜、不动效。
+   卡片留在原地显示「未设城市」，点一下告诉用户去哪儿填。 */
+function renderNoCity() {
+  $('#wxIcon').innerHTML = WX_ICONS.cloud;
+  $('#wxTemp').textContent = '--°';
+  $('#wxDesc').textContent = '未设城市';
+  $('#wxCity').textContent = '设置里填写';
+  $('#wxRange').textContent = '';
+  $('#weather').classList.remove('is-stale');
+  $('#weather').title = '还没有设置城市：设置 → 天气 → 城市，填了才会取天气并显示动效';
+  fxSync();
+  hintNoCityOnce();
+}
+
+/* 一次性提示。1.1.0 及之前城市留空会按 IP 自动定位，升级上来的人会突然
+   发现天气没了 —— 不解释一句就会被当成 bug。只提示一次，存 settings.noCityHint。
+   页面在后台时不提示也不置位，免得提示弹在一个看不见的标签页里。 */
+function hintNoCityOnce() {
+  if (state.data.settings.noCityHint) return;
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  state.data.settings.noCityHint = true;
+  persist();
+  toast('天气没显示了：在「设置 → 天气 → 城市」里填一个城市名就会恢复');
+}
+
 export function checkWeatherRefresh() {
   const w = state.data.settings.weather;
   if (!w?.fetchedAt || Date.now() - w.fetchedAt >= WEATHER_TTL) {
@@ -402,7 +413,9 @@ export const fx = {
   bolt: null,
   lastTs: 0,
   frameMs: 33,      // 30fps；电池供电时放宽到 40ms
-  sprites: null
+  sprites: null,
+  wallShade: 0.12,  // 1.3.3：按壁纸基调算出的镜头暗场强度（0~1，见 fxShade）
+  shadeAt: -9       // 上次计算暗场的时刻，1 秒节流
 };
 
 // 绘制期共享的尺寸 / 时间步（每个函数都读，省得层层传参）
@@ -442,7 +455,7 @@ function fxActive() {
   return mode === 'always' ? true : state.idleActive;
 }
 
-function fxKind() {
+export function fxKind() {
   const code = state.data.settings.weather?.code;
   if (code === undefined || code === null) return '';
   const mapped = WX_CODES[Number(code)];
@@ -796,15 +809,58 @@ function hazeBand(rgb, seed) {
   });
 }
 
-// 雨滴：一条带渐隐尾巴的竖线，画的时候按景深缩放
+// 雨滴：一条带渐隐尾巴的竖线，画的时候按景深缩放。
+// 1.3.3 加了 DARK_EDGE 冷暗轮廓：亮壁纸上亮芯会「提亮饱和」而消失，
+// 雨丝靠两侧这层暗边勾出形状；暗壁纸上暗边融进背景，亮芯照旧发光。
+// 一张雪碧图同时带明暗两极，不需要按壁纸切换贴图。
+const DARK_EDGE = '34,52,78';
+
 function rainSprite() {
   return mk(8, 64, (g, w, h) => {
+    // 两条纵向渐隐的暗边夹住亮芯。暗边要够深、够宽：雨丝本身只有 1~2px，
+    // 淡一点的暗边在抗锯齿后就化没了，亮壁纸依旧是白茫茫一片。
+    const mkEdge = (x, width) => {
+      const gr = g.createLinearGradient(0, 0, 0, h);
+      gr.addColorStop(0, 'rgba(' + DARK_EDGE + ',0)');
+      gr.addColorStop(0.45, 'rgba(' + DARK_EDGE + ',0.72)');
+      gr.addColorStop(1, 'rgba(' + DARK_EDGE + ',0.04)');
+      g.fillStyle = gr;
+      g.fillRect(x, 0, width, h);
+    };
+    mkEdge(0.6, 2.2);
+    mkEdge(5.2, 2.2);
+
     const gr = g.createLinearGradient(0, 0, 0, h);
     gr.addColorStop(0, 'rgba(200,224,255,0)');
     gr.addColorStop(0.45, 'rgba(214,232,255,0.95)');
     gr.addColorStop(1, 'rgba(180,210,255,0.1)');
     g.fillStyle = gr;
-    g.fillRect(2.6, 0, 2.8, h);
+    g.fillRect(2.8, 0, 2.4, h);
+  });
+}
+
+// 雪片：白芯 + 一圈冷灰蓝暗环（同 DARK_EDGE 思路）。
+// 暗环画在白芯之后、且中心留空，只勾外圈 —— 先画暗环会被白芯冲淡成灰雾。
+function flakeSprite() {
+  return mk(96, 96, (g) => {
+    const r = 48;
+    const core = g.createRadialGradient(r, r, 0, r, r, r);
+    core.addColorStop(0.00, 'rgba(255,255,255,1)');
+    core.addColorStop(0.26, 'rgba(255,255,255,0.62)');
+    core.addColorStop(1.00, 'rgba(255,255,255,0)');
+    g.fillStyle = core;
+    g.beginPath(); g.arc(r, r, r, 0, TAU); g.fill();
+
+    // 暗环别太「实」：峰值压到 0.36 并往外推开一点点，小尺寸下才不会被看成肥皂泡，
+    // 而是「雪花挡住了一点天空」的软阴影
+    const ring = g.createRadialGradient(r, r, r * 0.40, r, r, r);
+    ring.addColorStop(0.00, 'rgba(48,68,100,0)');
+    ring.addColorStop(0.34, 'rgba(48,68,100,0.30)');
+    ring.addColorStop(0.62, 'rgba(48,68,100,0.36)');
+    ring.addColorStop(0.86, 'rgba(48,68,100,0.12)');
+    ring.addColorStop(1.00, 'rgba(48,68,100,0)');
+    g.fillStyle = ring;
+    g.beginPath(); g.arc(r, r, r, 0, TAU); g.fill();
   });
 }
 
@@ -823,15 +879,18 @@ function buildSprites(kind, lv) {
     sp.ringCool = ringSprite('196,220,255');
     sp.streakBlue = streakSprite('188,206,255', 0.55);
     sp.streakWarm = streakSprite('255,226,178', 0.34);
-    sp.ghostWarm = softDisc('255,196,128', 256, 0.30, 0.34);
-    sp.ghostCyan = softDisc('140,208,255', 256, 0.32, 0.28);
+    // 1.3.3：光斑略加饱和 —— 白底上看的不是「更白」，是那一点青/暖的色偏
+    sp.ghostWarm = softDisc('255,184,108', 256, 0.30, 0.34);
+    sp.ghostCyan = softDisc('116,196,255', 256, 0.32, 0.28);
     sp.star = flareStar('255,238,206');
     sp.beam = beamSprite('255,224,178');
     sp.bkRingW = bokehSprite('255,214,158', 0);
-    sp.bkRingC = bokehSprite('168,214,255', 0);
+    sp.bkRingC = bokehSprite('150,206,255', 0);
     sp.bkHexW = bokehSprite('255,206,150', 6);
-    sp.bkHexC = bokehSprite('176,220,255', 6);
-    sp.flareDot = softDisc('255,250,238', 96, 0.16, 0.80);
+    sp.bkHexC = bokehSprite('158,212,255', 6);
+    sp.flareDot = softDisc('255,244,214', 96, 0.16, 0.80);
+    // 局部暗场：一张深色软圆，太阳周围一大片、光斑链每颗一小片
+    sp.flareShade = softDisc('20,28,44', 256, 0.30, 0.40);
   }
 
   if (kind === 'cloud' || kind === 'partly') {
@@ -883,7 +942,7 @@ function buildSprites(kind, lv) {
   }
 
   if (kind === 'snow') {
-    sp.flake = softDisc('255,255,255', 96, 0.26, 0.62);
+    sp.flake = flakeSprite();
     if (lv === 3) sp.rain = rainSprite();   // 雨夹雪 = 细雨 + 雪同行
   }
 
@@ -936,15 +995,19 @@ function fxGradients() {
 
 // 分级参数按 WWO 天气码来，不是随机：小雨和暴雨本来就该长得不一样。
 // n = 根数，len = 长度 px，v = 下落 px/s，w = 粗细，a = 透明度，smin = 够近才炸水花
+// 1.3.3：小雨原本 55 根 / 最短 8px / alpha 上限 0.34，在整屏里几乎读不出「在下雨」；
+//        只提 light 这一级，中雨以上一格不动，分级差异仍然保得住。
 const RAIN_LV = [
-  { key: 'light', name: '小雨', n: 55, len: [8, 18], v: [260, 430], w: [0.8, 1.5], a: [0.12, 0.34], veil: 0.030, mist: 0.000, smin: 0.60 },
+  { key: 'light', name: '小雨', n: 110, len: [12, 26], v: [280, 460], w: [1.0, 1.9], a: [0.24, 0.56], veil: 0.042, mist: 0.000, smin: 0.54 },
   { key: 'mid', name: '中雨', n: 180, len: [11, 25], v: [430, 680], w: [0.8, 1.8], a: [0.16, 0.44], veil: 0.050, mist: 0.035, smin: 0.48 },
   { key: 'heavy', name: '大雨', n: 330, len: [16, 38], v: [640, 1000], w: [1.0, 2.4], a: [0.20, 0.55], veil: 0.070, mist: 0.075, smin: 0.36 },
   { key: 'storm', name: '雷阵雨', n: 300, len: [18, 42], v: [720, 1080], w: [1.1, 2.6], a: [0.22, 0.58], veil: 0.085, mist: 0.090, smin: 0.30 }
 ];
 
 const SNOW_LV = [
-  { key: 'light', name: '小雪', n: 70, r: [1.1, 2.7], v: [16, 44], drift: [6, 14], a: [0.30, 0.70], veil: 0.020, near: 0 },
+  // 1.3.3：小雪原本 70 片 / 半径 1.1~2.7px / 没有近景层，暗底只看得见零星几个点；
+  //        near 加 4 片贴脸大雪花做景深，但速度仍按小雪，不借用大雪的参数。
+  { key: 'light', name: '小雪', n: 150, r: [1.5, 3.6], v: [22, 56], drift: [9, 20], a: [0.45, 0.92], veil: 0.032, near: 4 },
   { key: 'mid', name: '中雪', n: 200, r: [1.1, 2.9], v: [28, 70], drift: [9, 20], a: [0.35, 0.80], veil: 0.045, near: 0 },
   { key: 'heavy', name: '大雪', n: 340, r: [1.4, 4.0], v: [42, 100], drift: [14, 32], a: [0.40, 0.90], veil: 0.085, near: 10 },
   { key: 'sleet', name: '雨夹雪', n: 150, r: [0.9, 2.2], v: [22, 60], drift: [7, 16], a: [0.30, 0.75], veil: 0.040, near: 0 }
@@ -1384,6 +1447,76 @@ function renderSnow(t, cfg, mixed) {
 const SUN_SIZE = 0.78;  // 尺寸：本体、光晕、星芒、光斑链一起缩
 const SUN_GLOW = 0.70;  // 亮度：全部图层的 alpha 再乘这一档
 
+/* 1.3.3 亮底可见性 ---------------------------------------------------------
+   问题：光晕全靠「半透明亮色」叠在壁纸上。暗壁纸靠提亮显形；亮壁纸 RGB 已接近
+   255，再提也提不动 —— 单纯调 SUN_GLOW 只会让暗底过曝，亮底依旧看不见。
+   解法：先沿光轴铺一层很淡的冷暗场（真实逆光照片里光源周围本来就会掉反差），
+   把「提亮」换成「先压暗、再发光」。压多少按壁纸基调算：亮壁纸多压、暗壁纸少压。
+   太阳本体与四层大气光晕保持 1.1.0 的调暗决策不动，只给「镜头层」单独加增益。 */
+const FLARE_GAIN = 1.55;      // 星芒 / 光柱 / 光斑链 / 拉丝专用，不碰本体和大气光晕
+const FLARE_SHADE_BASE = 0.025;
+const FLARE_SHADE_GAIN = 0.20;
+
+// 只读 .bg 的行内样式：纯色 / 渐变能直接算亮度；图片壁纸（本地图、在线壁纸都是 blob URL）
+// 用 8×8 缩略采样读真实像素 —— 同源 blob 不污染画布，不需要任何新权限。
+// 采样是异步的：第一次遇到这张图先按 0.5 中值凑一帧，解码完就回填，最多晚两帧。
+const lumaCache = new Map();   // url → 0~1
+
+function sampleImageLuma(url) {
+  const im = new Image();
+  im.onload = () => {
+    try {
+      const c = document.createElement('canvas');
+      c.width = c.height = 8;
+      const g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(im, 0, 0, 8, 8);
+      const d = g.getImageData(0, 0, 8, 8).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        sum += (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      }
+      lumaCache.set(url, Math.max(0, Math.min(1, sum / (d.length / 4))));
+      fx.shadeAt = -9;             // 下一帧按真实亮度重算暗场
+    } catch { /* 读不到像素（真跨域时才会）就保持中值，不影响其他功能 */ }
+  };
+  im.onerror = () => {};
+  im.src = url;
+}
+
+function wallpaperLuma() {
+  const el = document.querySelector('.bg');
+  if (!el) return 0.5;
+  const img = el.style.backgroundImage || '';
+  const url = /url\("?([^")]+)"?\)/.exec(img);
+  if (url) {
+    const hit = lumaCache.get(url[1]);
+    if (hit !== undefined) return hit;
+    if (lumaCache.size > 12) lumaCache.clear();   // 换壁纸多了不至于一直涨
+    lumaCache.set(url[1], 0.5);                   // 占位，避免每帧重复发起解码
+    sampleImageLuma(url[1]);
+    return 0.5;
+  }
+
+  const css = `${img} ${el.style.backgroundColor || ''}`;
+  let sum = 0, n = 0;
+  const add = (r, g, b) => { sum += (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255; n++; };
+  for (const m of css.matchAll(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g)) {
+    add(+m[1], +m[2], +m[3]);
+  }
+  for (const m of css.matchAll(/#([0-9a-f]{6})\b/gi)) {
+    const v = parseInt(m[1], 16);
+    add((v >> 16) & 255, (v >> 8) & 255, v & 255);
+  }
+  return n ? Math.max(0, Math.min(1, sum / n)) : 0.5;
+}
+
+function fxShade() {
+  if (fx.t - fx.shadeAt < 1) return fx.wallShade;   // 1 秒节流：壁纸不会每帧变
+  fx.shadeAt = fx.t;
+  fx.wallShade = FLARE_SHADE_BASE + FLARE_SHADE_GAIN * wallpaperLuma();
+  return fx.wallShade;
+}
+
 function renderSun(t, dim = 1) {
   dim *= SUN_GLOW;
   const sp = fx.sprites;
@@ -1403,6 +1536,43 @@ function renderSun(t, dim = 1) {
   while (dA < -Math.PI) dA += TAU;
   FLARE.ang += dA * Math.min(1, DT * 2.4);
   FLARE.along = ft.along;
+
+  // ④ 的光轴几何提前算：暗场与亮层共用同一批落点，风一吹一起扫过去
+  const dist = Math.hypot(cx - sx, cy - sy);
+  const ax = Math.cos(FLARE.ang), ay = Math.sin(FLARE.ang);
+  const nx2 = -ay, ny2 = ax;
+  const stretch = 1 + FLARE.along * 0.22;
+  const dots = FLARE_CHAIN.map((g, i) => {
+    // 每颗都带一点自己的呼吸和横摆，免得像贴纸一样死钉在轴上
+    const ph = t * 0.7 + i * 1.37;
+    const k = g.k * stretch * (1 + 0.012 * Math.sin(ph));
+    const off = g.off + 0.006 * Math.sin(t * 0.33 + i);
+    return {
+      sp: g.sp,
+      gx: sx + ax * dist * k + nx2 * off * base,
+      gy: sy + ay * dist * k + ny2 * off * base,
+      rr: g.r * base * 1.12 * (1 + 0.05 * Math.sin(ph * 0.8)),
+      a: Math.min(0.92, g.a * dim * FLARE_GAIN) * (0.82 + 0.18 * Math.sin(ph))
+    };
+  });
+
+  // 亮底可见性：先铺冷暗场，再让光晕「发光」。压暗强度按壁纸基调来，
+  // 暗壁纸几乎不压；多云时随 dim 一起减弱，免得和云影叠成一团灰。
+  const shade = fxShade() * (dim / SUN_GLOW);
+  if (shade > 0.01) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    // 暗场只贴着光源和光斑走：铺太大就会在亮壁纸上糊成一团灰雾，不像镜头光晕
+    const vr = 0.60 * base * breathe;
+    ctx.globalAlpha = shade * 0.80;
+    ctx.drawImage(sp.flareShade, sx - vr, sy - vr, vr * 2, vr * 2);
+    for (const d of dots) {
+      const r2 = d.rr * 1.4;
+      ctx.globalAlpha = shade * 0.55;
+      ctx.drawImage(sp.flareShade, d.gx - r2, d.gy - r2, r2 * 2, r2 * 2);
+    }
+    ctx.restore();
+  }
 
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
@@ -1442,40 +1612,27 @@ function renderSun(t, dim = 1) {
   ctx.save();
   ctx.translate(sx, sy);
   ctx.rotate(spin);
-  ctx.globalAlpha = 0.62 * dim * (0.92 + 0.08 * Math.sin(t * 0.7));
+  ctx.globalAlpha = 0.62 * dim * FLARE_GAIN * (0.92 + 0.08 * Math.sin(t * 0.7));
   ctx.drawImage(sp.star, -sr, -sr, sr * 2, sr * 2);
   ctx.restore();
 
   // ④ 光柱 + 光斑链：两者共用同一条光轴，风一吹整组一起扫过去
-  const dist = Math.hypot(cx - sx, cy - sy);
-  const ax = Math.cos(FLARE.ang), ay = Math.sin(FLARE.ang);
-  const nx2 = -ay, ny2 = ax;
-  const stretch = 1 + FLARE.along * 0.22;
-
   ctx.save();
   ctx.translate(sx, sy);
   ctx.rotate(FLARE.ang);
-  ctx.globalAlpha = 0.30 * dim;
+  ctx.globalAlpha = Math.min(0.92, 0.30 * dim * FLARE_GAIN);
   ctx.drawImage(sp.beam, 0, -base * 0.16, dist * 2.3 * stretch, base * 0.32);
   ctx.restore();
 
-  for (let i = 0; i < FLARE_CHAIN.length; i++) {
-    const g = FLARE_CHAIN[i];
-    // 每颗都带一点自己的呼吸和横摆，免得像贴纸一样死钉在轴上
-    const ph = t * 0.7 + i * 1.37;
-    const k = g.k * stretch * (1 + 0.012 * Math.sin(ph));
-    const off = g.off + 0.006 * Math.sin(t * 0.33 + i);
-    const gx = sx + ax * dist * k + nx2 * off * base;
-    const gy = sy + ay * dist * k + ny2 * off * base;
-    const rr = g.r * base * (1 + 0.05 * Math.sin(ph * 0.8));
-    ctx.globalAlpha = g.a * dim * (0.82 + 0.18 * Math.sin(ph));
-    ctx.drawImage(sp[g.sp], gx - rr, gy - rr, rr * 2, rr * 2);
+  for (const d of dots) {
+    ctx.globalAlpha = d.a;
+    ctx.drawImage(sp[d.sp], d.gx - d.rr, d.gy - d.rr, d.rr * 2, d.rr * 2);
   }
 
   // ⑤ 横向拉丝：一条蓝白 + 一条更淡的暖白
-  ctx.globalAlpha = 0.30 * dim;
+  ctx.globalAlpha = 0.30 * dim * FLARE_GAIN;
   ctx.drawImage(sp.streakBlue, sx - W * 0.29, sy - 3, W * 0.58, 6);
-  ctx.globalAlpha = 0.14 * dim;
+  ctx.globalAlpha = 0.14 * dim * FLARE_GAIN;
   ctx.drawImage(sp.streakWarm, sx - W * 0.20, sy - 2, W * 0.40, 4);
 
   // ⑥ 浮尘：靠近太阳更亮；轻飘飘的，风一吹就斜着走
@@ -1707,4 +1864,15 @@ function fxDraw(dt) {
       renderSnow(fx.t, SNOW_LV[lv], false);
     }
   }
+}
+
+/* 预览 / 回归页用：不启动 rAF，按指定时刻精确画一帧。
+   动效本来是连续动画，截图比对必须能把时间钉住，否则两次截图粒子位置不同就没法比。
+   线上代码不调用它，但有了它，天气动效才有可重复的验收方式。
+   fx.shadeLock = true 时保留外部设定的 wallShade —— 回归页要关掉暗场做 A/B 对照，
+   否则「开了多大」永远只能说个感觉，说不出压了几个百分点。 */
+export function fxPaint(t, dt = 0.016) {
+  fx.t = t;
+  if (!fx.shadeLock) fx.shadeAt = -9;   // 预览页换壁纸后要立刻按新底图重算暗场，不能等 1 秒节流
+  fxDraw(dt);
 }

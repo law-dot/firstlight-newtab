@@ -37,12 +37,34 @@ export function feedColor(url) {
   return FEED_COLORS[h % FEED_COLORS.length];
 }
 
+/* 订阅分两半存：
+     state.data.feeds     配置（地址/名称/颜色）→ 跨设备同步
+     state.data.calfeeds  抓到的日历事件        → 只存本机，永不参与同步
+   混在一起的话，每次刷新都会改写 monk.feeds.v1 并推给别的设备；
+   几百个事件更会直接把这条记录顶过 storage.sync 的 8KB 单项上限，
+   结果整个订阅段一起不同步（和 1.1.0 分组超限是同一个坑）。 */
 export function listFeeds() {
-  return (state.data.feeds || []).filter((f) => f && typeof f === 'object');
+  return (state.data.feeds || []).filter((f) => f && typeof f === 'object' && f.kind === 'ics');
 }
 
 export function getFeed(id) {
   return listFeeds().find((f) => f.id === id) || null;
+}
+
+const EMPTY_RUNTIME = { items: [], lastSync: 0, error: '' };
+
+// 配置段（monk.feeds.v1）要跨设备同步，单项上限 8KB。单个订阅配置约 110B，
+// 正常用户远远够用；这道闸只是防「有人一口气订阅 80 个日历」把整段顶爆，
+// 一顶爆就是所有订阅配置一起不同步，还看不出原因。
+const FEEDS_SAFE_BYTES = 6500;
+
+export function feedRuntime(id) {
+  return state.data.calfeeds?.[id] || EMPTY_RUNTIME;
+}
+
+function setRuntime(id, patch) {
+  if (!state.data.calfeeds) state.data.calfeeds = {};
+  state.data.calfeeds[id] = { ...EMPTY_RUNTIME, ...(state.data.calfeeds[id] || {}), ...patch };
 }
 
 export function addFeed({ url, name }) {
@@ -54,13 +76,14 @@ export function addFeed({ url, name }) {
 
   const feed = {
     id: uid(),
+    kind: 'ics',
     url: url.trim(),
-    name: (name || defaultFeedName(url)).trim(),
-    color: feedColor(url),
-    items: [],
-    lastSync: 0,
-    error: ''
+    title: (name || defaultFeedName(url)).trim().slice(0, 40),
+    color: feedColor(url)
   };
+  if (JSON.stringify([...(state.data.feeds || []), feed]).length > FEEDS_SAFE_BYTES) {
+    return { ok: false, error: '订阅数量已达同步上限，请先删掉一些' };
+  }
   state.data.feeds = [...(state.data.feeds || []), feed];
   persist();
   // 立即同步一次
@@ -72,6 +95,8 @@ export function removeFeed(id) {
   const before = listFeeds().length;
   state.data.feeds = listFeeds().filter((f) => f.id !== id);
   if (state.data.feeds.length !== before) {
+    // 内容跟着删，别在本机留孤儿缓存
+    if (state.data.calfeeds) delete state.data.calfeeds[id];
     persist();
     renderTodo();
     cal.render();
@@ -81,8 +106,8 @@ export function removeFeed(id) {
 export function getFeedItems() {
   const all = [];
   for (const f of listFeeds()) {
-    for (const it of f.items || []) {
-      all.push({ ...it, feedId: f.id, feedName: f.name, color: f.color, kind: 'feed-event' });
+    for (const it of feedRuntime(f.id).items) {
+      all.push({ ...it, feedId: f.id, feedName: f.title, color: f.color, kind: 'feed-event' });
     }
   }
   return all;
@@ -146,11 +171,9 @@ export async function syncFeed(id) {
   if (!feed) return;
   const result = await fetchICS(feed.url);
   if (result.ok) {
-    feed.items = result.items;
-    feed.lastSync = Date.now();
-    feed.error = '';
+    setRuntime(id, { items: result.items, lastSync: Date.now(), error: '' });
   } else {
-    feed.error = result.error;
+    setRuntime(id, { error: result.error });
   }
   persist();
   renderTodo();

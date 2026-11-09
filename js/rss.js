@@ -10,6 +10,10 @@ import { hasFetchAccess, requestFetchAccess } from './core/permissions.js';
 let cache = {};
 let filter = 'all';
 
+// 日历订阅（kind: 'ics'）也住在 state.data.feeds 里——那是日历的事，
+// 不能拿到 RSS 里当源去拉：一个是 ICS 一个要 XML，互相解析都会失败。
+const rssFeeds = () => (state.data.feeds || []).filter((f) => f && f.kind !== 'ics');
+
 init();
 
 async function init() {
@@ -32,12 +36,13 @@ function applyTheme() {
 
 /* ---------- 刷新 ---------- */
 async function doRefresh(force = false) {
-  if (!state.data.feeds.length) return;
+  const feeds = rssFeeds();
+  if (!feeds.length) return;
   $('#refreshBtn').classList.add('spinning');
-  const hadEmpty = state.data.feeds.some((f) => !f.title);
-  cache = await refreshFeeds(state.data.feeds, { force });
+  const hadEmpty = feeds.some((f) => !f.title);
+  cache = await refreshFeeds(feeds, { force });
   // 有源标题被抓取回填 → 入库（走分段存储 + 同步推送）
-  if (hadEmpty && state.data.feeds.some((f) => f.title)) persist();
+  if (hadEmpty && feeds.some((f) => f.title)) persist();
   renderChips();
   renderEntries();
   $('#refreshBtn').classList.remove('spinning');
@@ -71,7 +76,7 @@ async function onAddFeed(e) {
     }
     // 用户手势里申请站点访问权限；拒绝也允许保存，抓取时会显示失败
     if (!(await hasFetchAccess())) await requestFetchAccess();
-    state.data.feeds.push({ id: uid(), title, url });
+    state.data.feeds.push({ id: uid(), kind: 'rss', title, url, color: '' });
     persist();
     $('#feedForm').reset();
     $('#feedDialog').close();
@@ -108,7 +113,7 @@ function onChipClick(e) {
 
 /* ---------- 渲染 ---------- */
 function renderChips() {
-  const feeds = state.data.feeds;
+  const feeds = rssFeeds();
   const box = $('#chips');
   if (!feeds.length) {
     box.innerHTML = '';
@@ -131,7 +136,7 @@ function renderChips() {
 }
 
 function renderEntries() {
-  const feeds = state.data.feeds;
+  const feeds = rssFeeds();
   const box = $('#entries');
   if (!feeds.length) {
     box.innerHTML = `

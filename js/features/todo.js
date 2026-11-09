@@ -1,10 +1,31 @@
 // 待办栏：圆形图标 / 常驻右侧 / 隐藏 三形态
-// v1.2 起面板改为「今日视图」：顶部撕页日历卡，中间今日日程时间轴，底部未完成待办（跨天累积，勾选才消失）
+// v1.2 起面板改为单日视图：顶部撕页日历卡，中间那天日程时间轴，底部待办
+// 1.3.1：日历卡加左右翻页，可查看前后任意一天；今天仍按「未完成跨天累积」，
+//        翻到别的日子则看那天的日程与当天安排的待办（含已完成，可勾回未完成）
 import { state, persist } from '../core/state.js';
 import { $, $$, toast } from '../core/utils.js';
 import { uid } from '../core/store.js';
-import { todayIso, todayItems } from './agenda.js';
+import { todayIso, todayItems, dayItems } from './agenda.js';
 import { getLunar } from './lunar.js';
+
+/* ---------- 单日视图 ----------
+   viewIso 为 null 时跟随「今天」；一旦翻页就钉在那个日期，
+   点「回到今天」才回到跟随模式。时间轴、订阅边注、待办区都跟着看的那天走。 */
+let viewIso = null;
+
+function isoOfDate(d) {
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${dd}`;
+}
+
+function shiftDay(n) {
+  const [y, m, d] = (viewIso || todayIso()).split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + n);
+  viewIso = isoOfDate(dt);
+  renderTodo();
+}
 
 export function applyTodoMode() {
   const mode = state.data.settings.todoMode || 'fab';
@@ -22,6 +43,7 @@ function openTodo() {
   if ((state.data.settings.todoMode || 'fab') !== 'fab') return;
   document.body.classList.add('todo-open');
   $('#todoFab').classList.add('active');
+  viewIso = null; // 重新打开先回今天，不把上次翻到的日期带进来
   renderTodo(); // 打开时刷新：跨天后时间轴和日期头要更新
 }
 
@@ -36,12 +58,16 @@ const WEEKDAYS = '日一二三四五六';
 // 撕页日历卡：年月 / 大日期 / 星期 / 农历，双休日红字（老挂历的规矩）
 // 底部「订阅边注」：今日订阅事件最多列 2 条，超出显示 +N；点击跳到时间轴对应项
 function renderCalCard(events = []) {
-  const now = new Date();
+  const today = todayIso();
+  const now = viewIso
+    ? (() => { const [y, m, d] = viewIso.split('-').map(Number); return new Date(y, m - 1, d); })()
+    : new Date();
   $('#todoCalYm').textContent = `${now.getFullYear()} 年 ${now.getMonth() + 1} 月`;
   $('#todoCalDay').textContent = String(now.getDate());
   $('#todoCalWk').textContent = `星期${WEEKDAYS[now.getDay()]}`;
   const weekend = now.getDay() === 0 || now.getDay() === 6;
   $('#todoCalDay').classList.toggle('weekend', weekend);
+  $('#todoCalBack').hidden = isoOfDate(now) === today;
   const lunar = getLunar(now);
   const lunarEl = $('#todoCalLunar');
   if (lunar) {
@@ -101,7 +127,11 @@ function jumpToTimeline(idx) {
 }
 
 export function renderTodo() {
-  const items = todayItems();
+  const today = todayIso();
+  const iso = viewIso || today;
+  const isToday = iso === today;
+  // 今天走累积规则（未完成跨天顺延）；别的日子就看那天安排了什么的待办（含已完成）
+  const items = isToday ? todayItems() : dayItems(iso);
   const events = items.events;
   renderCalCard(events);
   const timeline = $('#todoTimeline');
@@ -156,14 +186,15 @@ export function renderTodo() {
   section.hidden = todos.length === 0;
   todos.forEach((todo) => {
     const li = document.createElement('li');
+    li.classList.toggle('done', !!todo.done);
 
     const check = document.createElement('button');
     check.className = 'check';
     check.type = 'button';
-    check.textContent = '';
-    check.title = '完成';
+    check.textContent = todo.done ? '✓' : '';
+    check.title = todo.done ? '标记为未完成' : '完成';
     check.onclick = () => {
-      todo.done = true;
+      todo.done = !todo.done;
       persist();
       renderTodo();
     };
@@ -187,8 +218,10 @@ export function renderTodo() {
     list.append(li);
   });
 
-  // 两者都空：只显示空态一句话
-  $('#todoEmpty').hidden = events.length > 0 || todos.length > 0;
+  // 两者都空：只显示空态一句话（看哪天就说哪天）
+  const empty = $('#todoEmpty');
+  empty.textContent = isToday ? '今天没有安排' : '这一天没有安排';
+  empty.hidden = events.length > 0 || todos.length > 0;
 
   const left = (state.data.todos || []).filter((t) => !t.done).length;
   $('#todoLeft').textContent = left ? `· ${left}` : '';
@@ -211,7 +244,7 @@ function setAddMode(mode) {
 function showAddForm() {
   $('#todoAddBtn').hidden = true;
   $('#todoAddForm').hidden = false;
-  $('#todoAddDate').value = todayIso();
+  $('#todoAddDate').value = viewIso || todayIso();
   setAddMode('todo');
   setTimeout(() => $('#todoAddText').focus(), 60);
 }
@@ -260,7 +293,21 @@ export function bindTodo() {
     closeTodo();
   });
   document.addEventListener('keydown', (e) => {
+    const open = document.body.classList.contains('todo-open') ||
+      document.body.classList.contains('todo-mode-docked');
+    if (!open) return;
     if (e.key === 'Escape') closeTodo();
+    // 左右方向键翻单日：输入框里打字时不抢（target 可能是 document，没有 closest）
+    if (e.target.closest?.('input, textarea, select')) return;
+    if (e.key === 'ArrowLeft') shiftDay(-1);
+    if (e.key === 'ArrowRight') shiftDay(1);
+  });
+
+  $('#todoCalPrev').addEventListener('click', () => shiftDay(-1));
+  $('#todoCalNext').addEventListener('click', () => shiftDay(1));
+  $('#todoCalBack').addEventListener('click', () => {
+    viewIso = null;
+    renderTodo();
   });
 
   $('#todoAddBtn').addEventListener('click', showAddForm);

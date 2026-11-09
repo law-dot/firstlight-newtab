@@ -1,7 +1,7 @@
-// 左侧分组抽屉 + 网站卡片网格 + 分组/网站对话框 + 站点拖拽排序
+// 左侧分组抽屉 + 网站卡片网格 + 分组/网站对话框 + 站点拖拽排序（卡片换位 / 跨组移动 / 分组调序）
 import { state, persist } from '../core/state.js';
 import {
-  $, toast, normalizeUrl, hostOf, faviconOf, paintLetter, clearDropMarks
+  $, toast, normalizeUrl, hostOf, installIcon, clearDropMarks
 } from '../core/utils.js';
 import { uid } from '../core/store.js';
 import { renderDock, trackSiteUse } from './dock.js';
@@ -59,13 +59,52 @@ export function renderTabs() {
       renderGrid();
     };
 
+    // 1.2.7：编辑态拖分组调整左右顺序（卡片拖到分组上是另一条路，见下面 dragover 分流）
+    el.draggable = state.editMode;
+    if (state.editMode) el.title = '拖拽调整分组顺序';
+    el.addEventListener('dragstart', (e) => {
+      if (!state.editMode) return;
+      state.dragGroupId = group.id;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', group.id);
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      state.dragGroupId = null;
+      clearDropMarks();
+    });
+
     el.addEventListener('dragover', (e) => {
+      if (state.dragGroupId) {
+        // 正在拖分组：其他分组上方显示插入线
+        if (state.dragGroupId === group.id) return;
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        el.classList.toggle('drop-before', !after);
+        el.classList.toggle('drop-after', after);
+        return;
+      }
       if (!state.dragSiteId) return;
       e.preventDefault();
       el.classList.add('drop-over');
     });
-    el.addEventListener('dragleave', () => el.classList.remove('drop-over'));
+    // 指针从卡片移到自己的子元素（图标、名字）时也会触发 dragleave，
+    // 不判 relatedTarget 的话插入线会一路闪
+    el.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget && el.contains(e.relatedTarget)) return;
+      el.classList.remove('drop-over', 'drop-before', 'drop-after');
+    });
     el.addEventListener('drop', (e) => {
+      if (state.dragGroupId) {
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        clearDropMarks();
+        moveGroup(state.dragGroupId, group.id, after);
+        return;
+      }
       if (!state.dragSiteId) return;
       e.preventDefault();
       el.classList.remove('drop-over');
@@ -140,26 +179,6 @@ function makeCard(site, group, detail) {
   const ico = document.createElement('div');
   ico.className = 'ico';
 
-  const customIcon = site.icon || '';
-  const iconSrc = customIcon || faviconOf(site.url);
-
-  if (iconSrc) {
-    const img = document.createElement('img');
-    img.alt = '';
-    img.referrerPolicy = 'no-referrer';
-    img.draggable = false;
-    img.style.pointerEvents = 'none';
-    if (!customIcon) img.className = 'fav';
-    img.onerror = () => {
-      img.remove();
-      paintLetter(ico, site);
-    };
-    img.src = iconSrc;
-    ico.append(img);
-  } else {
-    paintLetter(ico, site);
-  }
-
   const name = document.createElement('div');
   name.className = 'name';
   name.textContent = site.title || hostOf(site.url);
@@ -201,18 +220,34 @@ function makeCard(site, group, detail) {
   };
 
   acts.append(edit, del);
-  card.append(ico, name, ...(desc ? [desc] : []), acts);
+
+  // 1.3.0 详情模式：左「品牌色块 .tile」+ 右「信息板 .info」；标准模式保持图标+名字横排。
+  // 色块底色由 utils.installIcon / applyBrandColor 按图标主色上（首字兜底走 letterColor 哈希色）
+  if (detail) {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    const info = document.createElement('div');
+    info.className = 'info';
+    tile.append(ico);
+    info.append(name, ...(desc ? [desc] : []));
+    installIcon(ico, site);
+    card.append(tile, info, acts);
+  } else {
+    installIcon(ico, site);
+    card.append(ico, name, ...(desc ? [desc] : []), acts);
+  }
 
   card.addEventListener('click', (e) => {
     if (state.editMode || e.target.closest('.acts')) {
       e.preventDefault();
       return;
     }
-    // 点击统计（智能 Dock 数据源）：等计数落盘后跳转，最多等 80ms
+    // 1.3.2：同步记账 + 同步新标签打开。页面不再跳走，不必等落盘；
+    // window.open 留在用户手势栈里，连续点卡片也不会被弹窗拦截。
+    // Dock 重绘由 trackSiteUse 在微任务里做（统计一变，Top5 与排序立刻跟着变）。
     e.preventDefault();
-    trackSiteUse(site.id).finally(() => {
-      location.href = site.url;
-    });
+    trackSiteUse(site.id);
+    window.open(site.url, '_blank', 'noopener');
   });
 
   card.addEventListener('dragstart', (e) => {
@@ -248,7 +283,8 @@ function makeCard(site, group, detail) {
     card.classList.toggle('drop-after', after);
   });
 
-  card.addEventListener('dragleave', () => {
+  card.addEventListener('dragleave', (e) => {
+    if (e.relatedTarget && card.contains(e.relatedTarget)) return;
     card.classList.remove('drop-before', 'drop-after');
   });
 
@@ -421,6 +457,28 @@ function removeGroup(groupId) {
 }
 
 /* ================= 拖拽排序 ================= */
+/* 分组调序：把 dragId 挪到 targetId 的 before/after。
+   先摘出再按 targetId 重新定位，避免「先前移再算下标」那类错位。 */
+function moveGroup(dragId, targetId, after) {
+  if (dragId === targetId) return;
+  const groups = state.data.groups;
+  const from = groups.findIndex((g) => g.id === dragId);
+  if (from < 0) return;
+  const [group] = groups.splice(from, 1);
+
+  let at = groups.findIndex((g) => g.id === targetId);
+  if (at < 0) {
+    groups.splice(from, 0, group); // target 不存在：原样放回，别丢分组
+    return;
+  }
+  if (after) at += 1;
+  groups.splice(Math.max(0, Math.min(at, groups.length)), 0, group);
+
+  state.dragGroupId = null;
+  persist();
+  renderTabs();
+}
+
 function moveSite(fromGroupId, siteId, toGroupId, index) {
   const from = state.data.groups.find((g) => g.id === fromGroupId);
   const to = state.data.groups.find((g) => g.id === toGroupId);
@@ -469,6 +527,26 @@ export function bindSidebar() {
     e.preventDefault();
     const group = currentGroup();
     moveSite(state.dragFromGroupId, state.dragSiteId, group.id, group.sites.length);
+  });
+
+  // 拖分组到列表末尾（+ 号上方、最后一个分组之后的空隙）
+  $('#tabs').addEventListener('dragover', (e) => {
+    if (!state.dragGroupId) return;
+    if (e.target.closest('.tab')) return;
+    e.preventDefault();
+  });
+  $('#tabs').addEventListener('drop', (e) => {
+    if (!state.dragGroupId) return;
+    if (e.target.closest('.tab')) return;
+    e.preventDefault();
+    const from = state.data.groups.findIndex((g) => g.id === state.dragGroupId);
+    if (from < 0) return;
+    const [group] = state.data.groups.splice(from, 1);
+    state.data.groups.push(group);
+    state.dragGroupId = null;
+    clearDropMarks();
+    persist();
+    renderTabs();
   });
 }
 

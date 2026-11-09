@@ -38,13 +38,19 @@ function occursOn(item, iso) {
   return expandOccurrences(item, iso, iso).includes(iso);
 }
 
+// 订阅事件的内容在本机缓存里（state.data.calfeeds），配置在 state.data.feeds。
+// 这里直接读 state 而不 import calfeed.js：calfeed → calendar → agenda 已经是一条链，
+// 反向再 import 就成环了。
 function feedItemsOf(iso) {
   const out = [];
+  const runtime = state.data.calfeeds || {};
   for (const f of (state.data.feeds || [])) {
-    if (!f || !Array.isArray(f.items)) continue;
-    for (const it of f.items) {
+    if (!f || f.kind !== 'ics') continue;
+    const items = runtime[f.id]?.items;
+    if (!Array.isArray(items)) continue;
+    for (const it of items) {
       if (!occursOn(it, iso)) continue;
-      out.push({ ...it, kind: 'feed-event', feedId: f.id, feedName: f.name, color: f.color });
+      out.push({ ...it, kind: 'feed-event', feedId: f.id, feedName: f.title, color: f.color });
     }
   }
   return out;

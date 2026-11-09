@@ -14,9 +14,12 @@ import { applySiteMode, applyLayout, renderGrid } from './sidebar.js';
 import { enableDescriptionsNow, bindDescNote } from './sitedesc.js';
 import { bindBookmarkImport } from './bookmarkimport.js';
 import {
-  addFeed, removeFeed, syncFeed, listFeeds, defaultFeedName, ensureFeedPermission
+  addFeed, removeFeed, syncFeed, listFeeds, feedRuntime, defaultFeedName, ensureFeedPermission
 } from './calfeed.js';
 import { renderAll, HOTKEY_DEFS, normalizeHotkey, getHotkeys, displayHotkey, findHotkeyConflict, setHotkey, resetHotkey } from '../app.js';
+
+// 壁纸模糊的常规说明；壁纸是纯色/渐变时会被换成「拖了也没用」的提示
+const BLUR_HINT = '把壁纸整体揉虚一层，前景的文字和卡片会更突出；纯色、渐变壁纸本来就没什么细节，拖了也看不出差别。';
 
 export function applyTheme() {
   const theme = state.data.settings.theme;
@@ -90,7 +93,9 @@ function renderAccentUI() {
 
 export function syncSettingsUI() {
   const s = state.data.settings;
-  const dim = s.wallpaper.dim ?? 30;
+  // 壁纸模糊：只有图片 / 在线壁纸有细节可虚化，纯色和渐变拖了也看不出，直接置灰
+  const blur = s.wallpaper.blur ?? 12;
+  const canBlur = s.wallpaper.type === 'image' || s.wallpaper.type === 'online';
 
   $$('#themeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.val === s.theme));
   renderAccentUI();
@@ -98,8 +103,12 @@ export function syncSettingsUI() {
   $('#engineSetting').value = s.engine;
   $('#customEngine').value = s.customEngine || '';
   $('#customEngine').style.display = s.engine === 'custom' ? '' : 'none';
-  $('#dimRange').value = String(dim);
-  $('#dimVal').textContent = `${dim}%`;
+  $('#blurRange').value = String(blur);
+  $('#blurRange').disabled = !canBlur;
+  $('#blurVal').textContent = `${blur}px`;
+  $('#blurHint').textContent = canBlur
+    ? BLUR_HINT
+    : '当前是纯色 / 渐变壁纸，模糊看不出效果；换成图片或在线壁纸才生效。';
   $$('#todoSeg button').forEach((b) => b.classList.toggle('on', b.dataset.val === (s.todoMode || 'fab')));
   $$('#dockSeg button').forEach((b) => b.classList.toggle('on', b.dataset.val === (s.dockMode || 'auto')));
   $$('#siteSeg button').forEach((b) => b.classList.toggle('on', b.dataset.val === (s.siteMode || 'standard')));
@@ -135,6 +144,8 @@ export function syncSettingsUI() {
   });
   const src = s.onlineSource || 'auto';
   $$('#onlineSource button').forEach((b) => b.classList.toggle('on', b.dataset.val === src));
+  const scene = s.wallpaperScene || 'nature';
+  $$('#onlineScene button').forEach((b) => b.classList.toggle('on', b.dataset.val === scene));
   $('#customWallpaper').style.display = src === 'custom' ? '' : 'none';
   if (document.activeElement !== $('#customWallpaper')) {
     $('#customWallpaper').value = s.customWallpaperUrl || '';
@@ -659,6 +670,8 @@ export function renderFeedList() {
     const li = document.createElement('li');
     li.className = 'feed-item';
 
+    const rt = feedRuntime(f.id); // 同步时间 / 失败原因只存在本机，不在 feeds 里
+
     const dot = document.createElement('i');
     dot.className = 'feed-color';
     dot.style.background = f.color || '#888';
@@ -667,14 +680,14 @@ export function renderFeedList() {
     info.className = 'feed-info';
     const name = document.createElement('div');
     name.className = 'feed-name';
-    name.textContent = f.name || defaultFeedName(f.url);
+    name.textContent = f.title || defaultFeedName(f.url);
     const url = document.createElement('div');
     url.className = 'feed-url';
     url.textContent = f.url;
     const status = document.createElement('div');
     status.className = 'feed-status';
-    if (f.error) status.textContent = `❌ ${f.error}`;
-    else if (f.lastSync) status.textContent = `✓ ${new Date(f.lastSync).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+    if (rt.error) status.textContent = `❌ ${rt.error}`;
+    else if (rt.lastSync) status.textContent = `✓ ${new Date(rt.lastSync).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
     else status.textContent = '未同步';
     info.append(name, url, status);
 
@@ -686,7 +699,7 @@ export function renderFeedList() {
       toast('同步中…');
       await syncFeed(f.id);
       renderFeedList();
-      toast(f.error ? '同步失败' : '已同步');
+      toast(feedRuntime(f.id).error ? '同步失败' : '已同步');
     };
 
     const delBtn = document.createElement('button');
@@ -694,7 +707,7 @@ export function renderFeedList() {
     delBtn.type = 'button';
     delBtn.textContent = '删除';
     delBtn.onclick = () => {
-      if (confirm(`删除订阅「${f.name || defaultFeedName(f.url)}」？`)) {
+      if (confirm(`删除订阅「${f.title || defaultFeedName(f.url)}」？`)) {
         removeFeed(f.id);
         renderFeedList();
       }

@@ -9,3 +9,6 @@
 *.ico binary
 *.webp binary
 *.zip binary
+
+# 开发用的预览页/截图：留在仓库里方便回看，但不进安装包
+preview/ export-ignore

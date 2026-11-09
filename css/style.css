@@ -3,6 +3,25 @@
   --muted: rgba(245, 247, 250, 0.62);
   --card: rgba(255, 255, 255, 0.09);
   --card-hover: rgba(255, 255, 255, 0.17);
+  /* 卡片毛玻璃：1.2.2 定版 60% 厚度 + 22px 模糊。
+     只给 .card 用，不用改 --card —— 后者还管提示条、Dock 等，
+     一起加厚会把整个界面糊成一片。 */
+  /* 卡片毛玻璃（1.2.3 定版 · 候选 C）
+     这套玻璃是「白色叠加」，把白调高只会更亮 —— 想变沉必须压一层暗底。
+     1.2.4 起 --glass 与 --panel 同源（同色同透明度）：壁纸上的所有块和设置栏观感统一，
+     之所以之前看着发灰发亮，是卡片用了独立的浅色叠加，和深色面板两套色。 */
+  --glass: rgba(18, 20, 26, 0.72);
+  --glass-hover: rgba(18, 20, 26, 0.8);
+  --glass-blur: 28px;
+  /* 摆在壁纸上的块（天气、搜索框、圆形按钮、提示条、待办面板）统一用这套，
+     别动 --card —— 面板内部的小按钮 / kbd 徽章还要靠它做浅色高亮 */
+  --block: rgba(18, 20, 26, 0.72);
+  --block-hover: rgba(18, 20, 26, 0.8);
+  /* 壁纸模糊半径：设置里的滑杆直接写这个变量，0 = 原图 */
+  --bg-blur: 12px;
+  /* 固定压暗层，只为在亮壁纸上保住文字对比度，不跟滑杆走 */
+  --bg-dim: 0.12;  /* 图标描边：去掉色块后深色 logo 会糊进壁纸，靠这圈细高光把轮廓提出来 */
+  --ring: rgba(255, 255, 255, 0.62);
   --stroke: rgba(255, 255, 255, 0.16);
   --panel: rgba(18, 20, 26, 0.72);
   --input: rgba(255, 255, 255, 0.1);
@@ -11,6 +30,13 @@
   --glow: rgba(124, 108, 246, 0.5);
   --glow-strong: rgba(124, 108, 246, 0.72);
   --shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  /* 卡片立体阴影（1.2.7）：贴地一层定住边缘、远一层拉出悬浮感，
+     末尾那层 inset 高光是「玻璃厚度」——纯靠外阴影在深色壁纸上会糊成一片。
+     只给 .card / 导入与添加格用；搜索框等仍用 --shadow 那套大扩散 */
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.22), 0 6px 18px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --card-shadow-hover: 0 2px 6px rgba(0, 0, 0, 0.24), 0 14px 30px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
   --radius: 16px;
   /* 原生下拉列表（select 展开的那一层）的底色。必须不透明：
      半透明会让桌面壁纸透上来，列表看着是花的。 */
@@ -26,14 +52,31 @@ html[data-theme="light"] {
   --muted: rgba(27, 31, 39, 0.58);
   --card: rgba(255, 255, 255, 0.6);
   --card-hover: rgba(255, 255, 255, 0.85);
+  /* 浅色候选 A：.808 像在壁纸上糊了层白纸，降到 .72（比 .62 那档保文字对比度更好）；
+     hover 沿用旧版 +0.08 的节奏 → .80 */
+  --glass: rgba(255, 255, 255, 0.72);
+  --glass-hover: rgba(255, 255, 255, 0.8);
+  --ring: rgba(0, 0, 0, 0.42);
   --stroke: rgba(0, 0, 0, 0.08);
-  --panel: rgba(250, 251, 254, 0.82);
+  --panel: rgba(255, 255, 255, 0.72);
+  /* 浅色同样与 --glass 同源：1.2.4 起全部统一到卡片样式（白 .72 + blur 28px），
+     抽屉 / 设置栏 / Dock / 待办都跟卡片一个观感；--card 只剩面板内部小按钮用 */
+  --block: rgba(255, 255, 255, 0.72);
+  --block-hover: rgba(255, 255, 255, 0.8);
   --input: rgba(0, 0, 0, 0.05);
   --accent-soft: rgba(124, 108, 246, 0.18);
   --glow: rgba(124, 108, 246, 0.34);
   --glow-strong: rgba(124, 108, 246, 0.5);
   --shadow: 0 18px 44px rgba(30, 40, 60, 0.16);
+  /* 浅色阴影更轻：白卡片本身亮，重阴影会显脏；色相带一点蓝灰贴近自然投影 */
+  --card-shadow: 0 1px 3px rgba(30, 40, 60, 0.1), 0 5px 16px rgba(30, 40, 60, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --card-shadow-hover: 0 2px 6px rgba(30, 40, 60, 0.12), 0 10px 24px rgba(30, 40, 60, 0.18),
+    inset 0 1px 0 #fff;
   --menu: #ffffff;
+  /* 浅色下的固定遮罩是白色，0.12 会在大图上蒙一层白雾 —— 降到 0.05，
+     只留一点点提亮保文字对比，通透感交还给壁纸本身 */
+  --bg-dim: 0.05;
   color-scheme: light;
 }
 
@@ -56,23 +99,27 @@ body {
 }
 
 /* ---------- 背景 ---------- */
+/* 1.2.3：模糊作用在壁纸本身，不再用整层遮罩压暗。
+   blur 会把边缘像素往外「化」成半透明，所以四边要按模糊半径外扩，
+   否则画面四周会出现一圈发虚的白边；外扩后 cover 会顺势放大一点，正好补上。 */
 .bg {
   position: fixed;
-  inset: 0;
+  inset: calc(var(--bg-blur) * -2.4);
   background: linear-gradient(160deg, #241b47 0%, #141a2e 55%, #0b0e16 100%);
   background-size: cover;
   background-position: center;
+  filter: blur(var(--bg-blur)) saturate(105%);
   transition: background-image 0.4s ease;
   z-index: 0;
 }
 
+/* 固定的一层极轻底色，只为在亮壁纸上保住文字对比度；不再暴露给用户调 */
 .bg-dim {
   position: fixed;
   inset: 0;
   background: #05070c;
-  opacity: 0.3;
+  opacity: var(--bg-dim);
   pointer-events: none;
-  transition: opacity 0.2s ease;
   z-index: 1;
 }
 
@@ -244,16 +291,16 @@ body.pomo-long .time { color: #dbeafe; text-shadow: 0 0 24px rgba(59, 130, 246, 
   padding: 8px 16px 8px 13px;
   border-radius: 14px;
   border: 1px solid var(--stroke);
-  background: var(--card);
+  background: var(--block);
   color: var(--text);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(28px) saturate(160%);
   transition: background 0.16s ease, transform 0.16s ease, opacity 0.16s ease, box-shadow 0.2s ease;
 }
 
-.weather:hover { background: var(--card-hover); }
+.weather:hover { background: var(--block-hover); }
 .weather:active { transform: scale(0.98); }
 .weather.is-stale { opacity: 0.6; }
 
@@ -319,14 +366,14 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   place-items: center;
   border-radius: 50%;
   border: 1px solid var(--stroke);
-  background: var(--card);
+  background: var(--block);
   color: var(--text);
   cursor: pointer;
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(28px) saturate(160%);
   transition: background 0.16s ease, transform 0.16s ease, box-shadow 0.2s ease;
 }
 
-.icon-btn:hover { background: var(--card-hover); }
+.icon-btn:hover { background: var(--block-hover); }
 .icon-btn:active { transform: scale(0.94); }
 .icon-btn.active { background: var(--accent); border-color: transparent; color: #fff; }
 
@@ -364,15 +411,15 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   gap: 6px;
   padding: 0 8px 0 18px;
   border-radius: 999px;
-  background: var(--card);
+  background: var(--block);
   border: 1px solid var(--stroke);
-  backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(28px) saturate(160%);
   box-shadow: var(--shadow);
   transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.2s ease;
 }
 
 .search:focus-within {
-  background: var(--card-hover);
+  background: var(--block-hover);
   border-color: var(--accent-soft);
 }
 
@@ -445,7 +492,7 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   border-radius: 16px;
   background: var(--panel);
   border: 1px solid var(--stroke);
-  backdrop-filter: blur(26px) saturate(160%);
+  backdrop-filter: blur(28px) saturate(160%);
   box-shadow: var(--shadow);
   padding: 8px;
   animation: suggest-pop 0.16s ease;
@@ -684,6 +731,15 @@ body.side-collapsed.side-peek .app { padding-left: 248px; }
   gap: 4px;
   overflow-y: auto;
   padding-bottom: 8px;
+  /* 分组多到要滚动时，右侧会冒出一条滚动条，压在毛玻璃边缘上很难看。
+     这里把滚动条本身藏掉，滚轮 / 触控板 / 键盘照样能滚。 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.side-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .side-rail {
@@ -766,6 +822,24 @@ body.side-collapsed .side-rail { display: inline-flex; }
   border-style: dashed;
 }
 
+/* 编辑态拖分组调序（1.2.7）：同样用伪元素画直线，不占布局高度也不受圆角影响 */
+.tab { position: relative; }
+.tab.dragging { opacity: 0.4; }
+.tab.drop-before::after,
+.tab.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--glow);
+  pointer-events: none;
+}
+.tab.drop-before::after { top: -2px; }
+.tab.drop-after::after { bottom: -2px; }
+
 .tab-act {
   width: 16px;
   height: 16px;
@@ -810,6 +884,15 @@ body.side-collapsed .side-rail { display: inline-flex; }
   gap: var(--grid-gap, 14px);
   padding: 2px 4px 22px 0;
   align-content: start;
+  /* 卡片多到要滚时，右侧那条滚动条压在毛玻璃卡片边上很难看。
+     只藏滚动条本身，滚轮 / 触控板 / 键盘照常能滚。 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.grid::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 /* 极简视图：只隐藏收藏卡片区（含卡片相关的提示条），其余 UI 全部保留 */
@@ -823,7 +906,7 @@ body.side-collapsed .side-rail { display: inline-flex; }
   gap: 10px;
   padding: 7px 10px 7px 12px;
   border-radius: 10px;
-  background: var(--card);
+  background: var(--block);
   border: 1px solid var(--stroke);
   font-size: 12px;
   color: var(--muted);
@@ -866,11 +949,8 @@ body.side-collapsed .side-rail { display: inline-flex; }
   to { opacity: 1; transform: none; }
 }
 
-.grid::-webkit-scrollbar { width: 6px; }
-.grid::-webkit-scrollbar-thumb {
-  background: var(--stroke);
-  border-radius: 3px;
-}
+/* 1.2.3：.grid 的自定义滚动条（6px 圆角 thumb）已废弃 —— 滚动条整体隐藏，
+   只留滚轮 / 触控板 / 键盘滚动。别再往回加：加回来就是卡片旁边那条灰竖条。 */
 
 .card {
   position: relative;
@@ -880,24 +960,41 @@ body.side-collapsed .side-rail { display: inline-flex; }
   justify-content: center;
   gap: 9px;
   border-radius: var(--radius);
-  background: var(--card);
-  border: 1px solid transparent;
+  background: var(--glass);
+  border: 1px solid var(--stroke);
   color: var(--text);
   text-decoration: none;
   cursor: pointer;
-  backdrop-filter: blur(16px) saturate(140%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  box-shadow: var(--card-shadow);
   transition: background 0.16s ease, transform 0.16s ease, border-color 0.16s ease, box-shadow 0.2s ease;
 }
 
 .card:hover {
-  background: var(--card-hover);
+  background: var(--glass-hover);
   transform: translateY(-2px);
+  box-shadow: var(--card-shadow-hover);
 }
 
 .card.dragging { opacity: 0.4; }
 
-.card.drop-before { border-top: 2px solid var(--accent); }
-.card.drop-after { border-bottom: 2px solid var(--accent); }
+/* 插入线（1.2.7）：不能用 border-top —— 卡片圆角 16px，2px 的 border
+   会顺着圆角拐下去，在 64px 高的卡上看着像描了半圈边。
+   改用伪元素画一条两端内缩的直线，不受圆角影响。 */
+.card.drop-before::after,
+.card.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--glow);
+  pointer-events: none;
+}
+.card.drop-before::after { top: -1px; }
+.card.drop-after::after { bottom: -1px; }
 
 .ico {
   width: 44px;
@@ -993,7 +1090,7 @@ body.editing .card:hover .acts { opacity: 1; }
 .card.import:hover {
   color: var(--text);
   border-color: var(--text);
-  background: var(--card);
+  background: var(--glass-hover);
 }
 
 .card.add {
@@ -1008,31 +1105,105 @@ body.editing .card:hover .acts { opacity: 1; }
 .card.add:hover {
   color: var(--text);
   border-color: var(--text);
-  background: var(--card);
+  background: var(--glass-hover);
 }
 
 /* ---------- 网站卡片三模式 × 布局密度（CSS 变量驱动） ----------
    --site-min：卡片最小宽度（由卡片模式决定：简洁 < 标准 < 详情）
-   --site-rows：卡片高度（模式定基准，布局密度再调）
+   --site-rows：卡片高度（模式定基准，布局密度再调；详情模式里它同时决定色块宽度）
    --grid-gap：行列间距（由布局密度决定：紧凑 6 / 标准 14 / 宽松 30） */
-body.site-detail { --site-min: 208px; --site-rows: 128px; }
+body:not(.site-detail) { --site-min: 180px; --site-rows: 64px; }
+body.layout-compact:not(.site-detail) { --site-rows: 56px; }
+body.layout-comfortable:not(.site-detail) { --site-rows: 76px; }
+body.layout-compact { --grid-gap: 6px; --site-rows: 84px; }
+body.layout-comfortable { --grid-gap: 30px; --site-rows: 132px; }
+
+/* ---------- 详情模式（1.3.0）：左品牌色块 + 右信息板 ----------
+   色块宽度 = 卡片高度（永远是正方形），换密度只动 --site-rows，色块自动跟随。
+   色块颜色：JS 从图标像素里取主色（utils.applyBrandColor），取不到时
+   paintLetter 落一版首字哈希色 —— 色块永远不开天窗。 */
+body.site-detail { --site-min: 284px; --site-rows: 104px; }
+body.layout-compact.site-detail { --site-min: 240px; --site-rows: 88px; }
+body.layout-comfortable.site-detail { --site-min: 320px; --site-rows: 116px; }
 
 body.site-detail .card {
-  gap: 6px;
-  padding: 8px 10px;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
 }
 
-body.layout-compact { --grid-gap: 6px; --site-rows: 84px; }
-body.layout-compact.site-detail { --site-rows: 108px; }
+/* 色块：只圆左侧两角，右侧被信息板顶住；overflow 裁掉渐变层的方角 */
+body.site-detail .card .tile {
+  position: relative;
+  flex: none;
+  width: calc(var(--site-rows) - 2px);
+  overflow: hidden;
+  border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
+}
 
-body.layout-comfortable { --grid-gap: 30px; --site-rows: 132px; }
-body.layout-comfortable.site-detail { --site-rows: 158px; }
+/* 一层同色明暗渐变，让纯色块不至于像一张平贴的色卡纸 */
+body.site-detail .card .tile::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0) 46%, rgba(0, 0, 0, 0.14));
+  pointer-events: none;
+}
+
+body.site-detail .card .tile .ico {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border-radius: 0;
+  font-size: calc(var(--site-rows) * 0.3); /* 首字兜底时字号跟色块走 */
+}
+
+body.site-detail .card .tile .ico img {
+  width: 46%;
+  height: 46%;
+  object-fit: contain;
+}
+
+body.site-detail .card .tile .ico img.fav {
+  width: 58%;
+  height: 58%;
+}
+
+/* 白化：只作用于 JS 判定「透明底 logo」的图标（img.wht）。
+   不能整排都描白 —— 白底方图会被描成一个白方块。 */
+body.site-detail .card .tile .ico img.wht {
+  filter: brightness(0) invert(1);
+  opacity: 0.96;
+}
+
+/* 信息板：整卡共享 .card 的毛玻璃，不再单独铺一层底色
+   （玻璃叠玻璃会发闷，1.2.4 统一时踩过） */
+body.site-detail .card .info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px 16px;
+}
+
+body.site-detail .card .name {
+  flex: none;
+  max-width: 100%;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: left;
+}
+
+/* 悬停时色块微亮一档，跟卡片的整体上浮呼应 */
+body.site-detail .card:hover .tile { filter: brightness(1.06); }
 
 .card .desc {
-  max-width: 94%;
   font-size: 11.5px;
-  line-height: 1.35;
-  text-align: center;
+  line-height: 1.45;
+  text-align: left;
   color: var(--muted);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1040,6 +1211,108 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
   overflow: hidden;
   overflow-wrap: break-word;
 }
+
+body.layout-compact.site-detail .card .desc { font-size: 11px; }
+
+/* 编辑态的 ✎ ✕ 压在信息板右上角，给标题让位 */
+body.editing.site-detail .card .info { padding-right: 44px; }
+
+/* 两个占位格也改成「左块右文」，跟真卡片一个骨架 */
+body.site-detail .card.import {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px 0 0;
+}
+
+body.site-detail .card.import .imp-ico {
+  flex: none;
+  width: calc(var(--site-rows) - 2px);
+  height: 100%;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
+  background: var(--card);
+  border-right: 1px solid var(--stroke);
+}
+
+body.site-detail .card.import .imp-label {
+  max-width: none;
+  text-align: left;
+  font-size: 12.5px;
+}
+
+body.site-detail .card.add { font-size: 26px; }
+
+/* ---------- 1.2.2：只看名字（standard）改成「图标左、名字右」横排 ----------
+   详情模式（site-detail）在上一段单独一套：左品牌色块 + 右信息板。
+   选择器都带 .card 前缀：Dock 也用 .ico，不加前缀会把 Dock 图标一起放成 48px。 */
+body:not(.site-detail) { --site-min: 180px; --site-rows: 64px; }
+body.layout-compact:not(.site-detail) { --site-rows: 56px; }
+body.layout-comfortable:not(.site-detail) { --site-rows: 76px; }
+
+body:not(.site-detail) .card {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+}
+
+/* 图标：去掉强调色块，48px 大图；overflow 放开，否则 drop-shadow 那圈描边会被裁掉 */
+body:not(.site-detail) .card .ico {
+  width: 48px;
+  height: 48px;
+  background: transparent;
+  border-radius: 12px;
+  overflow: visible;
+  transition: transform 0.18s ease;
+}
+
+body:not(.site-detail) .card:hover .ico { transform: scale(1.06); }
+
+body:not(.site-detail) .card .ico img,
+body:not(.site-detail) .card .ico img.fav {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 1px var(--ring)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.16));
+}
+
+/* 名字：字少自然一行（卡片 align-items 已让它垂直居中），字多折两行，两行还放不下才打点。
+   字距不动、字号不缩 —— 拉了字距「知乎」会变成两个遥相呼应的字，缩字号又跟旁边卡片大小不一。 */
+body:not(.site-detail) .card .name {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+  text-align: center;
+}
+
+/* 编辑态的 ✎ ✕ 压在右上角，给名字让出位置，不然会盖住第二行 */
+body.editing:not(.site-detail) .card { padding-right: 36px; }
+
+/* 两个占位格也改横排，否则 64px 高度里图标和文字会挤成一团 */
+body:not(.site-detail) .card.import {
+  flex-direction: row;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+body:not(.site-detail) .card.import .imp-label {
+  max-width: none;
+  text-align: left;
+}
+
+body:not(.site-detail) .card.add { padding: 0; }
 
 /* ---------- 待办 ---------- */
 .todo {
@@ -1052,9 +1325,9 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
   gap: 12px;
   padding: 18px;
   border-radius: 18px;
-  background: var(--card);
+  background: var(--panel);
   border: 1px solid var(--stroke);
-  backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(28px) saturate(160%);
   box-shadow: var(--shadow);
   overflow: hidden; /* 高度钉死，超出部分交给内部滚动区 */
 }
@@ -1151,6 +1424,9 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
 .todo-list li.done .check {
   background: var(--accent);
   border-color: var(--accent);
+  color: #fff;      /* 1.3.1：实心圈里要看得见勾 */
+  font-size: 11px;
+  line-height: 1;
 }
 
 .todo-list li.done .text {
@@ -1263,6 +1539,55 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
   color: #2B2B2B;
 }
 
+/* 1.3.1 翻页：贴在纸面左右内侧的小圆钮，hover 才显出底色 */
+.todo-cal-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #6E6350;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.todo-cal-nav svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.todo-cal-nav:hover { background: rgba(0, 0, 0, 0.08); color: #2B2B2B; }
+.todo-cal-nav:active { transform: translateY(-50%) scale(0.92); }
+.todo-cal-nav.prev { left: 4px; }
+.todo-cal-nav.next { right: 4px; }
+
+/* 不在今天：日期下方一枚虚线小签，点它回今天 */
+.todo-cal-back {
+  margin-top: 7px;
+  padding: 2px 11px;
+  font-size: 11px;
+  font-family: inherit;
+  color: #C0392B;
+  background: transparent;
+  border: 1px dashed #C0392B;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.todo-cal-back:hover { background: rgba(192, 57, 43, 0.08); }
+
 .todo-cal-rings {
   position: absolute;
   top: 6px;
@@ -1289,7 +1614,7 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
 }
 
 .todo-cal-day {
-  font-family: 'LXGW WenKai TC', Georgia, 'Songti SC', 'STSong', serif;
+  font-family: 'LXGW WenKai TC', 'LXGW WenKai', '霞鹜文楷', 'Kaiti SC', 'STKaiti', Georgia, 'Songti SC', 'STSong', serif;
   font-size: 64px;
   line-height: 1.1;
   font-weight: 700;
@@ -1302,7 +1627,7 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
 
 .todo-cal-lunar {
   margin-top: 4px;
-  font-family: 'LXGW WenKai TC', 'KaiTi', 'STKaiti', serif;
+  font-family: 'LXGW WenKai TC', 'LXGW WenKai', '霞鹜文楷', 'Kaiti SC', 'STKaiti', 'KaiTi', '楷体', serif;
   font-size: 13px;
   font-weight: 400;
   color: #C0392B;
@@ -1361,7 +1686,7 @@ body.layout-comfortable.site-detail { --site-rows: 158px; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'LXGW WenKai TC', 'KaiTi', 'STKaiti', serif;
+  font-family: 'LXGW WenKai TC', 'LXGW WenKai', '霞鹜文楷', 'Kaiti SC', 'STKaiti', 'KaiTi', '楷体', serif;
   font-size: 12px;
   color: #3A3730;
 }
@@ -1755,6 +2080,12 @@ input[type="range"] {
   accent-color: var(--accent);
 }
 
+/* 纯色 / 渐变壁纸没有细节可虚化，滑杆置灰，别让人以为拖了没反应 */
+input[type="range"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* ---------- 弹窗 ---------- */
 .dlg {
   width: 400px;
@@ -1764,7 +2095,7 @@ input[type="range"] {
   border-radius: 18px;
   background: var(--panel);
   color: var(--text);
-  backdrop-filter: blur(24px);
+  backdrop-filter: blur(28px) saturate(160%);
   box-shadow: var(--shadow);
   position: relative;
 }
@@ -2450,7 +2781,7 @@ body.idle-mode .weather .wx-icon svg { width: 20px; height: 20px; }
   overflow: hidden;
   padding: 10px 0;
   background: rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(16px);
+  backdrop-filter: blur(28px) saturate(160%);
   -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
   mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
   position: fixed;

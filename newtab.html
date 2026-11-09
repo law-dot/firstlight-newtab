@@ -1,14 +1,10 @@
 <!DOCTYPE html>
 <html data-theme="dark" lang="zh-CN">
 <head>
-<script src="/page/page_comm/inject.js"></script>
   <meta charset="utf-8">
   <meta content="width=device-width, initial-scale=1" name="viewport">
   <title>初见</title>
   <link href="css/style.css" rel="stylesheet">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=LXGW+WenKai+TC:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
   <div class="bg" id="bg"></div>
@@ -44,7 +40,7 @@
               <span class="wx-desc" id="wxDesc">加载中</span>
             </span>
             <span class="wx-sub">
-              <span id="wxCity">定位中</span>
+              <span id="wxCity">未设城市</span>
               <span id="wxRange"></span>
             </span>
           </span>
@@ -98,11 +94,18 @@
 
       <aside class="todo" id="todoPanel">
         <div class="todo-cal" id="todoCal">
+          <button aria-label="前一天" class="todo-cal-nav prev" id="todoCalPrev" title="前一天（←）" type="button">
+            <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+          </button>
+          <button aria-label="后一天" class="todo-cal-nav next" id="todoCalNext" title="后一天（→）" type="button">
+            <svg viewBox="0 0 24 24"><path d="M10 6l6 6-6 6"/></svg>
+          </button>
           <div class="todo-cal-rings"><i></i><i></i></div>
           <div class="todo-cal-ym" id="todoCalYm"></div>
           <div class="todo-cal-day" id="todoCalDay"></div>
           <div class="todo-cal-wk" id="todoCalWk"></div>
           <div class="todo-cal-lunar" id="todoCalLunar"></div>
+          <button class="todo-cal-back" hidden id="todoCalBack" title="回到今天" type="button">回到今天</button>
           <div class="todo-cal-feeds" id="todoCalFeeds" hidden>
             <ul class="todo-cal-feed-list" id="todoCalFeedList"></ul>
             <button class="todo-cal-feed-more" id="todoCalFeedMore" type="button" hidden></button>
@@ -217,18 +220,23 @@
         <button data-val="bing" type="button">Bing</button>
         <button data-val="custom" type="button">自选网站</button>
       </div>
+      <div class="seg" id="onlineScene">
+        <button data-val="nature" type="button">自然风光</button>
+        <button data-val="any" type="button">不限题材</button>
+      </div>
       <input id="customWallpaper" placeholder="粘贴壁纸网站或图片地址，如 https://example.com/wallpapers">
       <p class="hint" id="onlineStatus"></p>
     </section>
 
     <section class="field">
-      <label>背景遮罩 <span class="val" id="dimVal">30%</span></label>
-      <input id="dimRange" max="80" min="0" step="5" type="range">
+      <label>壁纸模糊 <span class="val" id="blurVal">12px</span></label>
+      <input id="blurRange" max="40" min="0" step="1" type="range">
+      <p class="hint" id="blurHint">把壁纸整体揉虚一层，前景的文字和卡片会更突出；纯色、渐变壁纸本来就没什么细节，拖了也看不出差别。</p>
     </section>
 
     <section class="field">
       <label>天气</label>
-      <input id="weatherCity" placeholder="城市，如 上海 / Beijing（留空按 IP 自动定位）">
+      <input id="weatherCity" placeholder="城市，如 上海 / 长沙（留空则不取天气）">
       <label class="sub">接口源</label>
       <select id="weatherSource">
         <option value="open-meteo">Open-Meteo（推荐 · 免 key）</option>
@@ -236,7 +244,7 @@
         <option value="custom">自定义接口</option>
       </select>
       <input id="customWeatherUrl" class="cond" data-show-for="custom" placeholder="https://your.api.com/weather?city={city}（{city} 会被替换）">
-      <p class="hint">换了源或城市后会立即刷新；某源挂了就换另一个，不用自己找代理。</p>
+      <p class="hint">换了源或城市后会立即刷新；某源挂了就换另一个，不用自己找代理。<br>留空就完全不取天气，天气动效也一起停 —— 不会去猜你在哪个城市，也不会向任何地方报告你的 IP。中文城市名用内置坐标表（离线、比在线匹配准），国外城市才查 Open-Meteo。</p>
     </section>
 
     <section class="field">

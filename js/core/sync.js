@@ -41,9 +41,12 @@ const PUSH_DEBOUNCE = 2000;
 const PULL_DEBOUNCE = 1000;
 
 // 只存本机、永不参与同步的键
+// 只存本机、永不参与同步的键。
+// 判断标准：内容是「这台机器算出来的」，别的设备自己能重新算一遍。
+//   feedcache / calfeeds = 抓取结果，同步过去只是白占 8KB 配额，还会让旧内容盖掉新内容。
 const LOCAL_ONLY = new Set([
-  'monk.syncconf.v1', 'monk.feedcache.v1', 'monk.migrate.backup.v1',
-  'monk.data.v1', 'monk.groups.v1'
+  'monk.syncconf.v1', 'monk.feedcache.v1', 'monk.calfeeds.v1',
+  'monk.migrate.backup.v1', 'monk.data.v1', 'monk.groups.v1'
 ]);
 const isOurs = (key) =>
   typeof key === 'string' && key.startsWith('monk.') && !LOCAL_ONLY.has(key);

@@ -6,9 +6,13 @@ const DB_NAME = 'monk';
 const DB_STORE = 'files';
 
 // 逻辑段：数据模型层的划分，内存里仍是 data.settings / data.groups / ...
-export const SECTIONS = ['settings', 'groups', 'todos', 'dock', 'events', 'feeds', 'stats'];
+export const SECTIONS = ['settings', 'groups', 'todos', 'dock', 'events', 'feeds', 'calfeeds', 'stats'];
 // 「一段一条记录」的简单段。groups 例外：它按分组拆成多条记录，见下
-export const SIMPLE_SECTIONS = ['settings', 'todos', 'dock', 'events', 'feeds', 'stats'];
+// feeds = 订阅的「配置」（地址/名称/颜色，要跨设备同步）
+// calfeeds = 订阅的「内容」（抓到的日历事件，只存本机，永不参与同步）
+//   两者必须分开：几百个事件的 ICS 塞进 monk.feeds.v1 会撞 8KB 单项上限，
+//   整个 feeds 段一起不同步（与 1.1.0 分组超限同款问题）。
+export const SIMPLE_SECTIONS = ['settings', 'todos', 'dock', 'events', 'feeds', 'calfeeds', 'stats'];
 
 const sectionKey = (s) => `monk.${s}.v1`;
 const SYNC_CONF_KEY = 'monk.syncconf.v1'; // 同步配置只存本机，永不参与同步
@@ -68,15 +72,21 @@ export function makeDefault() {
       customEngine: '',
       theme: 'auto',
       accent: '',   // 界面强调色，'' = 用默认紫 #7c6cf6；设置里可换预设或自定义
-      wallpaper: { type: 'online', value: '', dim: 30 },
+      // blur：壁纸模糊半径（px）。1.2.3 起取代旧的 dim（整层压暗/压亮的遮罩），
+      // 遮罩退成一层固定的极轻底色，见 css 里 .bg-dim
+      wallpaper: { type: 'online', value: '', blur: 12 },
       onlineMode: 'daily',
       onlineInterval: 30,
       onlineSource: 'auto',
+      // 在线壁纸的题材：nature = 只要自然风光（默认），any = 不限。
+      // Bing 每日图没有题材参数，只能在返回的文案上分类，规则见 wallpaper.js
+      wallpaperScene: 'nature',
       customWallpaperUrl: '',
-      weatherCity: '',
+      weatherCity: '',              // 留空 = 不取天气（1.2.0 起不再按 IP 自动定位）
       weatherSource: 'open-meteo',  // wttr | open-meteo | custom
       customWeatherUrl: '',         // 用户填的自定义 URL（支持 {city} 占位）
       weather: null,
+      noCityHint: false,            // 「城市留空所以没天气」的提示是否已弹过
       idleMinutes: 10,
       idleTicker: true,
       // 默认常驻播放：新用户装上就能看到动效，不用等 10 分钟待机也不用进设置（1.1.0.6）
@@ -107,8 +117,45 @@ export function makeDefault() {
     dock: [],
     events: [],
     feeds: [],
+    calfeeds: {},
     stats: {}
   };
+}
+
+/* ---------- 订阅内容（只存本机，永不参与同步） ----------
+   calfeeds[id] = { items: [{ date, time, text, rrule }], lastSync, error }
+   单个源最多留 MAX_CAL_ITEMS 条：日历订阅常是「每天一条」的长期日程，
+   不设上限本机存储会无限长。500 条够覆盖一年多的每日事件。 */
+const MAX_CAL_ITEMS = 500;
+
+function normalizeCalFeed(raw) {
+  const items = Array.isArray(raw?.items)
+    ? raw.items
+        .filter((it) => it && it.date)
+        .slice(0, MAX_CAL_ITEMS)
+        .map((it) => ({
+          date: String(it.date).slice(0, 10),
+          time: it.time ? String(it.time).slice(0, 5) : '',
+          text: String(it.text || '').slice(0, 120),
+          rrule: it.rrule ? String(it.rrule).slice(0, 255) : ''
+        }))
+    : [];
+  return {
+    items,
+    lastSync: Number(raw?.lastSync) || 0,
+    error: String(raw?.error || '').slice(0, 80)
+  };
+}
+
+function normalizeCalFeeds(raw) {
+  const out = {};
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [id, v] of Object.entries(raw)) {
+      if (!id || !v || typeof v !== 'object') continue;
+      out[id] = normalizeCalFeed(v);
+    }
+  }
+  return out;
 }
 
 export function normalize(raw) {
@@ -158,7 +205,14 @@ export function normalize(raw) {
     delete wallpaper.bing;
   }
   settings.wallpaper = wallpaper;
+  // 1.2.3：dim（整层压暗/压亮）退役 → blur（壁纸模糊）。
+  // 旧用户的 dim 直接丢弃：遮罩现在固定 12%，模糊给默认值，读起来不会突然变成一张全锐利的壁纸。
+  if (raw.settings?.wallpaper?.blur == null) wallpaper.blur = 12;
+  const blurNum = Number(wallpaper.blur);
+  wallpaper.blur = Number.isFinite(blurNum) ? Math.min(40, Math.max(0, Math.round(blurNum))) : 12;
+  delete wallpaper.dim;
   if (!['auto', 'bing', 'custom'].includes(settings.onlineSource)) settings.onlineSource = 'auto';
+  if (!['nature', 'any'].includes(settings.wallpaperScene)) settings.wallpaperScene = 'nature';
   if (!['daily', 'rotate', 'interval'].includes(settings.onlineMode)) settings.onlineMode = 'daily';
   settings.onlineInterval = [10, 30, 60].includes(Number(settings.onlineInterval)) ? Number(settings.onlineInterval) : 30;
   // Dock 三态：智能(自动收录 Top5) / 手动 / 关闭；旧版 'on' 迁移为手动
@@ -207,15 +261,29 @@ export function normalize(raw) {
         }))
     : [];
 
-  // feeds：RSS 订阅源，标题可留空（首次抓取后自动回填）
+  // feeds：订阅的**配置**，只放跨设备需要一致的东西（地址/名称/颜色）。
+  // 抓到的内容一律不进这里——见下方 calfeeds。
+  // 标题可留空（RSS 首次抓取后自动回填）
+  const calfeeds = normalizeCalFeeds(raw.calfeeds);
   const feeds = Array.isArray(raw.feeds)
     ? raw.feeds
         .filter((f) => f && f.url)
-        .map((f) => ({
-          id: f.id || uid(),
-          title: String(f.title || '').slice(0, 40),
-          url: String(f.url)
-        }))
+        .map((f) => {
+          const id = f.id || uid();
+          // 1.2.0 早期版本把 items 直接写在 feed 里（会跟着同步走）。
+          // 老数据读到就地迁进本机缓存，之后 feeds 记录不再带内容。
+          if (Array.isArray(f.items) && !calfeeds[id]) {
+            calfeeds[id] = normalizeCalFeed(f);
+          }
+          return {
+            id,
+            kind: f.kind === 'ics' ? 'ics' : 'rss',
+            url: String(f.url),
+            // title 是唯一名字字段；name 是 1.2.0 早期日历订阅用的旧字段，读进来兼容
+            title: String(f.title || f.name || '').slice(0, 40),
+            color: String(f.color || '').slice(0, 20)
+          };
+        })
     : [];
 
   // stats：站点点击统计 { siteId: { n, last } }，智能 Dock 的数据源
@@ -235,6 +303,7 @@ export function normalize(raw) {
     dock: validDock,
     events,
     feeds,
+    calfeeds,
     stats
   };
 }

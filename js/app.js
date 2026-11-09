@@ -17,7 +17,7 @@ import {
 import { pomo, bindPomodoro } from './features/pomodoro.js';
 import { bindCalendar } from './features/calendar.js';
 import { renderTodo, applyTodoMode, closeTodo, bindTodo } from './features/todo.js';
-import { setupFeedAlarm, syncAll as syncAllFeeds } from './features/calfeed.js';
+import { setupFeedAlarm, syncAll as syncAllFeeds, listFeeds as listCalFeeds } from './features/calfeed.js';
 import { updateIdleTicker } from './features/feed.js';
 import { renderDock, applyDockMode, bindDock } from './features/dock.js';
 import {
@@ -114,7 +114,7 @@ function bind() {
 
   // 日历订阅定时同步（每天一次），有订阅源才启动
   setupFeedAlarm();
-  if ((state.data.feeds || []).length > 0) {
+  if (listCalFeeds().length > 0) {
     syncAllFeeds(); // 首次打开新标签页尝试刷新一次（需要用户同意 optional_host_permissions）
   }
 
@@ -414,7 +414,10 @@ function enterIdle() {
   if (state.idleActive) return;
   state.idleActive = true;
   document.body.classList.add('idle-mode');
-  if (state.data.settings.idleTicker !== false) updateIdleTicker(state.data.feeds);
+  // 跑马灯只吃 RSS 源；日历订阅在同一数组里（kind: 'ics'），混进去会被当 RSS 解析而报错
+  if (state.data.settings.idleTicker !== false) {
+    updateIdleTicker((state.data.feeds || []).filter((f) => f && f.kind !== 'ics'));
+  }
   closeDrawer();
   closeTodo();
   hideSuggest();
