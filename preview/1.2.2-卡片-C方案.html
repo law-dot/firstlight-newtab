@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>初见 1.2.2 · C 方案预览（横排）</title>
+<style>
+  :root {
+    --text: #f5f7fa;
+    --muted: rgba(245, 247, 250, .62);
+    --faint: rgba(245, 247, 250, .38);
+    --card: rgba(255, 255, 255, .09);
+    --card-hover: rgba(255, 255, 255, .17);
+    --stroke: rgba(255, 255, 255, .16);
+    --panel: rgba(18, 20, 26, .72);
+    --accent: #7c6cf6;
+    --shadow: 0 18px 48px rgba(0, 0, 0, .28);
+    --radius: 16px;
+
+    --ico: 48px;
+    --name-size: 12.5px;
+    --card-min: 180px;
+    --grid-gap: 14px;
+    --blur: 22px;
+    --ring: rgba(255, 255, 255, .62);
+    --letter-bg: rgba(255, 255, 255, .14);
+  }
+  html[data-theme="light"] {
+    --text: #1b1f27;
+    --muted: rgba(27, 31, 39, .58);
+    --faint: rgba(27, 31, 39, .34);
+    --card: rgba(255, 255, 255, .6);
+    --card-hover: rgba(255, 255, 255, .85);
+    --stroke: rgba(0, 0, 0, .08);
+    --panel: rgba(250, 251, 254, .86);
+    --shadow: 0 18px 48px rgba(20, 26, 40, .14);
+    --ring: rgba(0, 0, 0, .42);
+    --letter-bg: rgba(0, 0, 0, .09);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    min-height: 100vh; padding-bottom: 70px;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+      "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    color: var(--text);
+    background: #0b0d12;
+    background-image:
+      radial-gradient(1100px 620px at 12% -6%, rgba(124, 108, 246, .55), transparent 62%),
+      radial-gradient(900px 560px at 88% 4%, rgba(54, 190, 214, .34), transparent 60%),
+      radial-gradient(760px 620px at 50% 108%, rgba(236, 92, 160, .22), transparent 62%),
+      linear-gradient(160deg, #14141f 0%, #0b0d12 45%, #0a0c11 100%);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+  }
+  body[data-wall="photo"] {
+    background-image:
+      radial-gradient(900px 500px at 20% 10%, rgba(255, 138, 76, .75), transparent 60%),
+      radial-gradient(800px 520px at 80% 30%, rgba(38, 190, 168, .7), transparent 60%),
+      radial-gradient(700px 500px at 45% 90%, rgba(120, 92, 255, .6), transparent 62%),
+      linear-gradient(150deg, #2a1d2e 0%, #10202a 50%, #1a1220 100%);
+  }
+  body[data-wall="bright"] {
+    background-image:
+      radial-gradient(900px 520px at 15% 0%, rgba(255, 255, 255, .9), transparent 60%),
+      radial-gradient(800px 520px at 85% 10%, rgba(200, 220, 255, .8), transparent 62%),
+      linear-gradient(160deg, #eef2f8 0%, #dfe6f2 60%, #e9eef6 100%);
+  }
+  body[data-wall="gray"] {
+    background-image: linear-gradient(160deg, #23262d 0%, #16181d 60%, #121418 100%);
+  }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+  header.top { padding: 36px 0 16px; }
+  header.top h1 { margin: 0 0 8px; font-size: 20px; font-weight: 650; }
+  header.top p { margin: 0; max-width: 780px; font-size: 13px; line-height: 1.7; color: var(--muted); }
+
+  .panel {
+    position: sticky; top: 0; z-index: 20;
+    margin: 14px 0 26px; padding: 13px 16px;
+    border-radius: 16px; background: var(--panel);
+    border: 1px solid var(--stroke); box-shadow: var(--shadow);
+    backdrop-filter: blur(18px) saturate(160%);
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px 22px; align-items: end;
+  }
+  .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .ctl > label { font-size: 11px; letter-spacing: .4px; color: var(--faint); text-transform: uppercase; }
+  .seg { display: flex; flex-wrap: wrap; gap: 4px; }
+  .seg button {
+    padding: 5px 9px; font-size: 12px; font-family: inherit;
+    color: var(--muted); background: rgba(255, 255, 255, .06);
+    border: 1px solid transparent; border-radius: 8px; cursor: pointer; transition: .15s;
+  }
+  html[data-theme="light"] .seg button { background: rgba(0, 0, 0, .045); }
+  .seg button:hover { color: var(--text); }
+  .seg button.on { color: #fff; background: var(--accent); }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+  .block { margin: 0 0 30px; }
+  .block-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 12px; flex-wrap: wrap; }
+  .block-head h2 { margin: 0; font-size: 14.5px; font-weight: 600; }
+  .block-head span { font-size: 12px; color: var(--muted); }
+  .note { margin: 0 0 10px; font-size: 12px; color: var(--faint); line-height: 1.6; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(var(--card-min), 1fr));
+    gap: var(--grid-gap);
+    align-content: start;
+  }
+
+  /* ---------- C 方案：图标左、名字右 ---------- */
+  .card {
+    display: flex; align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    min-width: 0;
+    min-height: calc(var(--ico) + 16px);
+    border-radius: var(--radius);
+    background: var(--card);
+    border: 1px solid transparent;
+    color: var(--text); text-decoration: none;
+    backdrop-filter: blur(var(--blur)) saturate(150%);
+    transition: background .16s ease, transform .16s ease;
+  }
+  .card:hover { background: var(--card-hover); transform: translateY(-1px); }
+
+  .ico {
+    width: var(--ico); height: var(--ico); flex: none;
+    display: grid; place-items: center;
+    overflow: hidden;
+    font-size: calc(var(--ico) * .42); font-weight: 600; line-height: 1;
+    color: var(--text);
+    background: transparent;
+    transition: transform .18s ease, background .16s ease;
+  }
+  .ico img {
+    width: 100%; height: 100%; display: block;
+    object-fit: contain;
+    /* 描边：给深色 logo 一圈极细的高光，去掉色块后不至糊在壁纸里 */
+    filter: drop-shadow(0 0 1px var(--ring)) drop-shadow(0 1px 2px rgba(0, 0, 0, .16));
+  }
+  /* 无图标：灰底 + 首字（不用站点配色，避免一排彩色球） */
+  .ico.letter {
+    background: var(--letter-bg);
+    border-radius: calc(var(--ico) * .26);
+    color: #fff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .18);
+  }
+  .ico.letter img { display: none; }
+
+  .name {
+    flex: 1; min-width: 0;
+    font-size: var(--name-size);
+    font-weight: 500;
+    line-height: 1.3;
+    opacity: .95;
+    text-align: center;
+    /* 字少 → 自然一行（.card 的 align-items:center 负责垂直居中）
+       字多 → 折两行，两行还放不下才打点。字距保持正常，不做拉伸
+       两行 12.5×1.3 ≈ 32.5px，仍在卡片 64px 高度内，卡片不会被撑高 */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;   /* 英文长单词（Management）也能断，否则整词被挤出去 */
+  }
+  /* 开关「关」时退回原始行为：单行打点 */
+  body[data-fit="0"] .name {
+    display: block;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+  }
+
+  .card:hover .ico { transform: scale(1.06); }
+
+  /* 正方形变体（可选，看它是不是你要的） */
+  body[data-shape="square"] .card {
+    aspect-ratio: 1 / 1;
+    flex-direction: column; justify-content: center; align-items: center;
+    gap: 9px; padding: 10px;
+  }
+  body[data-shape="square"] .name { flex: none; width: 100%; max-width: 94%; text-align: center; }
+
+  /* 占位格 */
+  .card.ghost {
+    justify-content: center; color: var(--muted);
+    border: 1px dashed var(--stroke); background: transparent;
+    backdrop-filter: none; font-family: inherit; font-size: 20px; cursor: pointer;
+  }
+  .card.ghost:hover { color: var(--text); border-color: var(--text); background: var(--card); }
+  .card.ghost .gl { font-size: 12px; font-weight: 500; }
+  body[data-shape="square"] .card.ghost { flex-direction: column; }
+
+  .params {
+    margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: rgba(0, 0, 0, .28); border: 1px solid var(--stroke);
+    color: var(--text); word-break: break-all; line-height: 1.7;
+  }
+  html[data-theme="light"] .params { background: rgba(0, 0, 0, .05); }
+  .btn {
+    margin-top: 10px; padding: 7px 14px; font-size: 12.5px; font-family: inherit;
+    color: var(--text); background: rgba(255, 255, 255, .1);
+    border: 1px solid var(--stroke); border-radius: 9px; cursor: pointer;
+  }
+  .btn:hover { background: var(--accent); color: #fff; border-color: transparent; }
+
+  .verdict {
+    padding: 15px 18px; border-radius: 14px; font-size: 13px; line-height: 1.8;
+    color: var(--muted); background: var(--panel); border: 1px solid var(--stroke);
+  }
+  .verdict b { color: var(--text); }
+  .verdict ol { margin: 8px 0 0; padding-left: 20px; }
+
+  @media (max-width: 860px) {
+    .panel { position: static; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+</style>
+</head>
+<body data-wall="deep" data-shape="row">
+<div class="wrap">
+
+  <header class="top">
+    <h1>C 方案 · 图标在左、名字在右 <span style="font-size:12px;color:var(--muted);font-weight:400">v3 · 列宽 180 + 名字两行</span></h1>
+    <p>
+      图标 48 · 间距 10 · 字号 12.5 · 列宽 180 · 描边开 · 悬停放大 · 图标源 favicon.ico · 有图标的站不加底衬。<br>
+      本版：<b>①无图标＝强调色随机色块 ②毛玻璃更厚 ③名字字少单行居中、字多折两行（字距不动）④列宽可到 180</b>。
+    </p>
+  </header>
+
+  <div class="panel">
+    <div class="ctl">
+      <label>壁纸</label>
+      <div class="seg" id="segWall">
+        <button data-wall="deep" class="on">深紫</button>
+        <button data-wall="photo">花哨照片</button>
+        <button data-wall="bright">明亮浅色</button>
+        <button data-wall="gray">中性深灰</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label>主题</label>
+      <div class="seg" id="segTheme">
+        <button data-theme="dark" class="on">深色</button>
+        <button data-theme="light">浅色</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label>卡片形状</label>
+      <div class="seg" id="segShape">
+        <button data-shape="row" class="on">横条</button>
+        <button data-shape="square">正方形</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label>列宽 <span id="minVal">180</span>px · 图标 <span id="icoVal">48</span>px</label>
+      <div class="seg" id="segMin">
+        <button data-min="180" class="on">180</button>
+        <button data-min="200">200</button>
+        <button data-min="220">220</button>
+        <button data-min="248">248</button>
+        <button data-min="280">280</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label>毛玻璃厚度 <span id="frostVal">60</span>%</label>
+      <input type="range" id="frostRange" min="0" max="100" step="5" value="60">
+    </div>
+    <div class="ctl">
+      <label>模糊半径 <span id="blurVal">22</span>px</label>
+      <div class="seg" id="segBlur">
+        <button data-blur="12">12</button>
+        <button data-blur="16">16</button>
+        <button data-blur="22" class="on">22</button>
+        <button data-blur="28">28</button>
+        <button data-blur="36">36</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label>名字折行</label>
+      <div class="seg" id="segFit">
+        <button data-fit="1" class="on">两行折行</button>
+        <button data-fit="0">单行截断</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="block">
+    <div class="block-head">
+      <h2>1 · 主体</h2>
+      <span>真实站点、真实 favicon</span>
+    </div>
+    <div class="grid" id="gridMain"></div>
+  </div>
+
+  <div class="block">
+    <div class="block-head">
+      <h2>2 · 无图标站点（强调色随机首字）</h2>
+      <span>这些域名取不到 favicon，走首字 + 强调色随机色块</span>
+    </div>
+    <div class="grid" id="gridLetter"></div>
+  </div>
+
+  <div class="block">
+    <div class="block-head">
+      <h2>3 · 长名字（看折行与打点）</h2>
+      <span>一行放不下就折成两行；两行还放不下才打点</span>
+    </div>
+    <div class="grid" id="gridLong"></div>
+  </div>
+
+  <div class="block">
+    <div class="block-head">
+      <h2>4 · 参数与两点提醒</h2>
+    </div>
+    <div class="verdict">
+      <ol style="margin:0">
+        <li><b>首字色块 = 强调色 ±120° 随机 + 亮度 44–55%。</b>同一域名每次刷新颜色一样（按域名哈希），不会闪；切上面强调色，整排色块跟着换族。想让它们更花，把范围放大到 ±120° 也行，说一声。</li>
+        <li><b>毛玻璃默认 60%：深色 31% 白、浅色 81% 白。</b>模糊半径可另调 12/16/22/28/36px（默认 22）：<b>模糊越大越发灰发糊、也越吃 GPU</b>，36px 在低配机上滚动可能掉帧；12px 基本只是「磨砂玻璃膜」，壁纸的花纹还能透出来。觉得壁纸还在干扰就往上推滑杆；推太高（&gt;80%）会显得像实心卡片、失去透感。</li>
+        <li><b>名字（本版定版）：字距不动。</b>字少 → 自然单行、由卡片居中（垂直居中）；字多 → 折两行（行高 1.3），两行还放不下才打点。<b>不再缩字号、也不拉字距</b>——拉字距会让「知乎」变成两个遥相呼应的字，缩字号又跟旁边卡片大小不一，都比打点更扎眼。两行占 32.5px，仍在卡片 64px 高度内，卡片不会被撑高、网格不会跳。</li>
+        <li><b>「180」是最小值，不是实际宽度。</b>网格是 <code>minmax(180px, 1fr)</code>，窗口 1272 时排 5 列、每列被拉到 <b>215px</b>，名字区约 131px → 中文约 10 字/行、两行 20 字。所以「腾讯云开发者社区」单行放得下、不折；「AWS Management Console」「一个特别特别长的网站名字」才会折两行。要卡片真的钉在 180，得改成固定宽度（不留弹性），说一声我加一档。</li>
+      </ol>
+      <div class="params" id="paramOut"></div>
+      <button class="btn" id="copyBtn">复制参数</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const MAIN = [
+  { name: 'GitHub', host: 'github.com' },
+  { name: '知乎', host: 'www.zhihu.com' },
+  { name: '哔哩哔哩', host: 'www.bilibili.com' },
+  { name: '语雀', host: 'www.yuque.com' },
+  { name: '飞书', host: 'www.feishu.cn' },
+  { name: 'Notion', host: 'www.notion.so' },
+  { name: 'X', host: 'x.com' },
+  { name: 'YouTube', host: 'www.youtube.com' },
+  { name: 'Medium', host: 'medium.com' },
+  { name: 'Apple', host: 'www.apple.com' },
+  { name: '豆瓣', host: 'www.douban.com' },
+  { name: 'V2EX', host: 'www.v2ex.com' },
+  { name: 'Figma', host: 'www.figma.com' },
+  { name: '少数派', host: 'sspai.com' },
+  { name: '掘金', host: 'juejin.cn' },
+  { name: '淘宝', host: 'www.taobao.com' }
+];
+
+const LETTER = [
+  { name: '内部知识库', host: 'wiki.example.com' },
+  { name: '家庭相册', host: 'photo.example.com' },
+  { name: '公司 OA', host: 'oa.example.com' },
+  { name: '记账本', host: 'ledger.example.com' },
+  { name: 'NAS', host: 'nas.example.com' },
+  { name: '服务器监控', host: 'status.example.com' },
+  { name: '论文库', host: 'paper.example.com' },
+  { name: '待读清单', host: 'read.example.com' }
+];
+
+const LONG = [
+  { name: '腾讯云开发者社区', host: 'cloud.tencent.com' },
+  { name: 'AWS Management Console', host: 'console.aws.amazon.com' },
+  { name: '一个特别特别长的网站名字', host: 'long.example.com' },
+  { name: 'Stack Overflow 中文站', host: 'stackoverflow.com' },
+  { name: '12306 铁路客票系统', host: 'www.12306.cn' },
+  { name: 'GitHub Pull Requests', host: 'github.com' },
+  { name: '公司内部数据看板', host: 'dash.example.com' },
+  { name: 'RSS 阅读器', host: 'rss.example.com' }
+];
+
+const state = { wall: 'deep', theme: 'dark', shape: 'row', min: 180, ico: 48, frost: .60, fit: true, blur: 22 };
+
+/* ---------- 首字色块：主题强调色 ± 随机偏移，同域名稳定 ---------- */
+/* FNV-1a + 收尾混合：域名只差几个字符时也能散开（原来那个 hash 会把相似域名
+   挤到同一个色相区间，一排全是紫的） */
+function hash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i += 1) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  h ^= h >>> 13;
+  h = Math.imul(h, 0x5bd1e995);
+  h ^= h >>> 15;
+  return h >>> 0;
+}
+
+function accentHue() {
+  const v = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '').trim();
+  return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v) ? hexToHue(v) : 250;
+}
+
+function hexToHue(hex) {
+  const m = hex.replace('#', '');
+  const r = parseInt(m.slice(0, 2), 16) / 255;
+  const g = parseInt(m.slice(2, 4), 16) / 255;
+  const b = parseInt(m.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  if (!d) return 250;
+  let h;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return ((h * 60) + 360) % 360;
+}
+
+/* ±120° 的色相摆动 + 亮度小幅抖动 → 五彩，但整排仍锚在主题强调色上 */
+function letterColor(host) {
+  const base = accentHue();
+  const off = (hash(host) % 241) - 120;
+  const hue = (base + off + 360) % 360;
+  const light = 44 + (hash(host + '#l') % 12);
+  return `hsl(${hue} 64% ${light}%)`;
+}
+
+function makeCard(site) {
+  const a = document.createElement('a');
+  a.className = 'card';
+  a.href = '#';
+  a.title = site.name + ' · ' + site.host;
+  a.addEventListener('click', (e) => e.preventDefault());
+
+  const ico = document.createElement('span');
+  ico.className = 'ico';
+
+  const toLetter = () => {
+    ico.textContent = (site.name || site.host).trim().charAt(0).toUpperCase();
+    ico.classList.add('letter');
+    // 直接上 inline 背景：一个色块一个色，避免依赖 CSS 变量继承
+    try {
+      ico.style.background = letterColor(site.host);
+    } catch {
+      ico.style.background = 'var(--letter-bg)';
+    }
+  };
+
+  const img = document.createElement('img');
+  img.alt = '';
+  img.referrerPolicy = 'no-referrer';
+  img.onerror = () => { img.remove(); toLetter(); };
+  img.src = 'https://' + site.host + '/favicon.ico';
+  ico.append(img);
+
+  // 超时兜底：3 秒还没回来就先显示首字，图晚到再换回去
+  const timer = setTimeout(() => {
+    if (ico.querySelector('img')) { img.remove(); toLetter(); }
+  }, 3000);
+  img.onload = () => clearTimeout(timer);
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = site.name;
+
+  a.append(ico, name);
+  return a;
+}
+
+function fill(id, sites) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  box.textContent = '';
+  sites.forEach((s) => box.append(makeCard(s)));
+  if (id === 'gridMain') {
+    const imp = document.createElement('button');
+    imp.type = 'button';
+    imp.className = 'card ghost';
+    imp.innerHTML = '<span class="gl">⬇ 导入收藏夹</span>';
+    box.append(imp);
+
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'card ghost';
+    add.textContent = '+';
+    box.append(add);
+  }
+}
+
+function applyVars() {
+  const r = document.documentElement.style;
+  r.setProperty('--ico', state.ico + 'px');
+  r.setProperty('--card-min', state.min + 'px');
+  r.setProperty('--blur', state.blur + 'px');
+
+  // 毛玻璃厚度：深色底靠「提白」、浅色底靠「加白」，同一个滑杆控制两边
+  const dark = state.theme === 'dark';
+  const alpha = dark ? 0.09 + state.frost * 0.36 : 0.58 + state.frost * 0.38;
+  const hover = Math.min(alpha + 0.07, 1);
+  r.setProperty('--card', dark
+    ? `rgba(255, 255, 255, ${alpha.toFixed(3)})`
+    : `rgba(255, 255, 255, ${alpha.toFixed(3)})`);
+  r.setProperty('--card-hover', `rgba(255, 255, 255, ${hover.toFixed(3)})`);
+  r.setProperty('--stroke', dark
+    ? `rgba(255, 255, 255, ${(0.10 + state.frost * 0.18).toFixed(3)})`
+    : `rgba(0, 0, 0, ${(0.06 + state.frost * 0.06).toFixed(3)})`);
+  document.getElementById('frostVal').textContent = Math.round(state.frost * 100);
+  document.getElementById('blurVal').textContent = state.blur;
+  document.documentElement.dataset.theme = state.theme;
+  document.body.dataset.wall = state.wall;
+  document.body.dataset.shape = state.shape;
+  document.body.dataset.fit = state.fit ? '1' : '0';
+  document.getElementById('icoVal').textContent = state.ico;
+  document.getElementById('minVal').textContent = state.min;
+  document.getElementById('paramOut').textContent =
+    `形状:${state.shape}; 列宽:${state.min}px; 图标:${state.ico}px; 间距:10px; 字号:12.5px/500; ` +
+    `名字:${state.fit ? '两行折行(字距正常)' : '单行截断'}; 无图标:强调色随机; 描边:on; 悬停放大:on; ` +
+    `图标源:favicon.ico; 底衬:none; 毛玻璃:${Math.round(state.frost * 100)}%; 模糊:${state.blur}px; ` +
+    `theme:${state.theme}; wall:${state.wall}`;
+}
+
+function renderAll() {
+  applyVars();
+  fill('gridMain', MAIN);
+  fill('gridLetter', LETTER);
+  fill('gridLong', LONG);
+}
+
+function seg(id, fn) {
+  document.getElementById(id).addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    [...e.currentTarget.querySelectorAll('button')].forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    fn(b);
+  });
+}
+
+seg('segWall', (b) => { state.wall = b.dataset.wall; renderAll(); });
+seg('segTheme', (b) => { state.theme = b.dataset.theme; renderAll(); });
+seg('segShape', (b) => { state.shape = b.dataset.shape; renderAll(); });
+seg('segMin', (b) => { state.min = +b.dataset.min; renderAll(); });
+seg('segFit', (b) => { state.fit = b.dataset.fit === '1'; renderAll(); });
+seg('segBlur', (b) => { state.blur = +b.dataset.blur; applyVars(); });
+
+document.getElementById('frostRange').addEventListener('input', (e) => {
+  state.frost = +e.target.value / 100;
+  applyVars();
+});
+
+document.getElementById('copyBtn').addEventListener('click', async () => {
+  const t = document.getElementById('paramOut').textContent;
+  try {
+    await navigator.clipboard.writeText(t);
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = '复制参数'; }, 1400);
+  } catch { /* 忽略：file:// 下剪贴板可能被拒 */ }
+});
+
+// 地址参数便于对比截图： #theme=light&wall=photo&shape=square
+(function readHash() {
+  const q = new URLSearchParams(location.hash.replace(/^#/, ''));
+  if (q.get('theme')) state.theme = q.get('theme');
+  if (q.get('wall')) state.wall = q.get('wall');
+  if (q.get('shape')) state.shape = q.get('shape');
+  if (q.get('min')) state.min = +q.get('min');
+  if (q.get('ico')) state.ico = +q.get('ico');
+  if (q.get('blur')) state.blur = +q.get('blur');
+  document.querySelectorAll('#segTheme button').forEach((b) => b.classList.toggle('on', b.dataset.theme === state.theme));
+  document.querySelectorAll('#segWall button').forEach((b) => b.classList.toggle('on', b.dataset.wall === state.wall));
+  document.querySelectorAll('#segShape button').forEach((b) => b.classList.toggle('on', b.dataset.shape === state.shape));
+  document.querySelectorAll('#segMin button').forEach((b) => b.classList.toggle('on', +b.dataset.min === state.min));
+  document.querySelectorAll('#segBlur button').forEach((b) => b.classList.toggle('on', +b.dataset.blur === state.blur));
+})();
+
+renderAll();
+</script>
+</body>
+</html>

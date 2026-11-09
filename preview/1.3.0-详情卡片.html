@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>初见 1.3.0 · 详情卡片（色块 + 信息板）</title>
+<!-- 开发预览页（不进安装包）：直接加载线上 style.css + utils.js，
+     结构与 makeCard(site, group, detail=true) 完全一致，改版先在这里调。 -->
+<link rel="stylesheet" href="../css/style.css">
+<style>
+  /* 只加预览页自己的外壳样式，不碰线上规则 */
+  .pv-wrap { max-width: 1060px; margin: 0 auto; padding: 34px 30px 80px; }
+  .pv-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+  .pv-head h1 { margin: 0 0 6px; font-size: 19px; font-weight: 650; }
+  .pv-head p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.7; max-width: 640px; }
+  .pv-bar {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    padding: 11px 13px; margin-bottom: 20px;
+    border: 1px solid var(--stroke); border-radius: 14px;
+    background: var(--block);
+    backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  }
+  .pv-seg { display: flex; padding: 3px; gap: 2px; border-radius: 9px; background: var(--input); }
+  .pv-seg button {
+    border: 0; background: transparent; color: var(--muted); font: inherit;
+    font-size: 12px; padding: 5px 10px; border-radius: 7px; cursor: pointer;
+  }
+  .pv-seg button.on { background: var(--accent); color: #fff; }
+  .pv-lbl { font-size: 11.5px; color: var(--muted); }
+  .pv-note { margin-top: 26px; font-size: 11.5px; color: var(--muted); line-height: 1.8; }
+  .pv-results { margin-top: 14px; padding: 12px 16px; border-radius: 12px; border: 1px solid var(--stroke); background: var(--block); font: 11.5px/1.8 ui-monospace, Menlo, monospace; color: var(--muted); white-space: pre-wrap; }
+  .pv-results b { color: var(--text); font-weight: 600; }
+  h2.pv-sec { margin: 34px 0 14px; font-size: 14px; font-weight: 600; }
+  /* 预览区借用 .grid：line 876 的 .grid 是 flex:1，这里要自然高度 */
+  .pv-grid.grid { flex: none; }
+  /* 线上 body 是 overflow:hidden（新标签页不滚动），预览页要能滚 */
+  body { overflow: auto; }
+  /* 线上壁纸由 JS 写入 .bg，预览页给它一块近似的底色 */
+  html[data-theme="light"] .bg {
+    background: linear-gradient(160deg, #f6f9fb 0%, #e4edf4 55%, #d5e2ec 100%);
+  }
+</style>
+</head>
+<body class="site-detail">
+<div class="bg"></div><div class="bg-dim"></div>
+
+<div class="pv-wrap">
+  <div class="pv-head">
+    <div>
+      <h1>详情模式 · 品牌色块卡片</h1>
+      <p>左正方形色块（宽度 = 卡片高度）+ 右信息板。色块颜色由 <code>utils.applyBrandColor</code> 从图标像素取主色，取不到退回首字哈希色；透明底 logo 自动描白。线上代码已同步本样式。</p>
+    </div>
+    <div class="pv-lbl">开发预览 · 不进安装包</div>
+  </div>
+
+  <div class="pv-bar">
+    <span class="pv-lbl">主题</span>
+    <div class="pv-seg" data-key="theme"><button data-v="dark" class="on">深色</button><button data-v="light">浅色</button></div>
+    <span class="pv-lbl">密度</span>
+    <div class="pv-seg" data-key="density"><button data-v="compact">紧凑</button><button data-v="std" class="on">标准</button><button data-v="comfortable">宽松</button></div>
+    <span class="pv-lbl">编辑态</span>
+    <div class="pv-seg" data-key="edit"><button data-v="off" class="on">关</button><button data-v="on">开</button></div>
+    <span class="pv-lbl" style="margin-left:auto">图标走各站 /favicon.ico，本地无网络时显示首字</span>
+  </div>
+
+  <h2 class="pv-sec">布局实样（真实 CSS + 真实 installIcon）</h2>
+  <div class="grid pv-grid" id="grid"></div>
+
+  <h2 class="pv-sec">取色自检（data-URL 合成图标，画布可读，验证提取逻辑）</h2>
+  <div class="grid pv-grid" id="lab"></div>
+  <div class="pv-results" id="results">运行中…</div>
+
+  <div class="pv-note">
+    对照表：<b>布局区</b> 12 张卡 = 彩色透明 logo / 无彩 logo / 不透明方图 / 首字兜底 全覆盖；
+    <b>自检区</b> 四张合成图标断言提取结果（红色透明标 → 红色块+描白；黑色标 → 深板岩灰+描白；
+    不透明青色方图 → 不描白；全透明 → 不上色，保留哈希色）。
+  </div>
+</div>
+
+<script type="module">
+import { installIcon } from '../js/core/utils.js';
+
+const SITES = [
+  { t:'番茄小说', d:'番茄小说（原木叶文学）旗下原创文学平台', u:'https://fanqienovel.com' },
+  { t:'iTab 新标签页', d:'非常漂亮的新标签页，把常用网站变成桌面', u:'https://itab.link' },
+  { t:'书签地球', d:'中国首家浏览器书签共享平台', u:'https://www.bookmarkearth.com' },
+  { t:'Steam', d:'全球大型游戏发布平台，买游戏、看评测、逛创意工坊', u:'https://store.steampowered.com' },
+  { t:'Apple 中国', d:'探索 Apple 充满创新的世界', u:'https://www.apple.com.cn' },
+  { t:'Dribbble', d:'设计师作品社区，找灵感的地方', u:'https://dribbble.com' },
+  { t:'哔哩哔哩', d:'年轻人的潮流文化娱乐社区', u:'https://www.bilibili.com' },
+  { t:'GitHub', d:'全球最大的代码托管与协作平台', u:'https://github.com' },
+  { t:'知乎', d:'有问题，就会有答案', u:'https://www.zhihu.com' },
+  { t:'豆瓣', d:'读书、电影、音乐，标记你的生活', u:'https://www.douban.com' },
+  { t:'少数派', d:'高效工作，品质生活', u:'https://sspai.com' },
+  { t:'WordPress', d:'开源建站系统，全球四成网站用它', u:'https://wordpress.org' }
+];
+
+/* 与 makeCard(detail=true) 同构的最小实现 */
+function makeCard(site, group) {
+  const card = document.createElement('a');
+  card.className = 'card';
+  card.href = site.url;
+  card.target = '_blank';
+  card.rel = 'noopener';
+
+  const ico = document.createElement('div');
+  ico.className = 'ico';
+
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = site.t;
+  const desc = document.createElement('div');
+  desc.className = 'desc';
+  desc.textContent = site.d;
+
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  const info = document.createElement('div');
+  info.className = 'info';
+  tile.append(ico);
+  info.append(name, desc);
+  installIcon(ico, { title: site.t, url: site.u, icon: site.icon });
+  card.append(tile, info);
+
+  card.addEventListener('click', (e) => e.preventDefault());
+  return card;
+}
+
+const grid = document.getElementById('grid');
+SITES.forEach((s) => grid.append(makeCard(s, { name: '示例' })));
+
+/* 占位格：导入收藏夹 / 添加网站 */
+const imp = document.createElement('button');
+imp.className = 'card import';
+imp.type = 'button';
+imp.innerHTML = '<span class="imp-ico">⬇</span><span class="imp-label">导入收藏夹：把浏览器里的网站搬进来</span>';
+grid.append(imp);
+
+const add = document.createElement('button');
+add.className = 'card add';
+add.type = 'button';
+add.textContent = '+';
+grid.append(add);
+
+/* ---------- 取色自检 ---------- */
+function synthIcon(draw) {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  draw(c.getContext('2d'));
+  return c.toDataURL('image/png');
+}
+
+const CASES = [
+  {
+    name: '红色透明标（期望：红色块 + 描白）',
+    icon: synthIcon((ctx) => {
+      ctx.fillStyle = '#e23b3b';
+      ctx.beginPath(); ctx.arc(32, 32, 20, 0, Math.PI * 2); ctx.fill();
+    }),
+    check: (tile, img) => {
+      const c = parseColor(tile.style.background);
+      return c && (c.h < 25 || c.h > 335) && c.s >= 40 && img.classList.contains('wht');
+    }
+  },
+  {
+    name: '黑色透明标（期望：深板岩灰 + 描白）',
+    icon: synthIcon((ctx) => {
+      ctx.fillStyle = '#111';
+      ctx.fillRect(24, 12, 16, 40);
+    }),
+    check: (tile, img) => {
+      const c = parseColor(tile.style.background);
+      return c && c.s <= 14 && c.l <= 30 && img.classList.contains('wht');
+    }
+  },
+  {
+    name: '不透明青色方图（期望：不上白化，色块取主色）',
+    icon: synthIcon((ctx) => {
+      ctx.fillStyle = '#128f8f';
+      ctx.fillRect(0, 0, 64, 64);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(20, 28, 24, 8);
+    }),
+    check: (tile, img) => {
+      const c = parseColor(tile.style.background);
+      return c && Math.abs(c.h - 180) < 30 && !img.classList.contains('wht');
+    }
+  },
+  {
+    name: '全透明图（期望：退回首字 + 哈希色块）',
+    icon: synthIcon(() => {}),
+    check: (tile, img) => !!parseColor(tile.style.background) && !img && !!tile.querySelector('.ico').textContent
+  }
+];
+
+function parseColor(str) {
+  let m = /hsl\((\d+)\s+(\d+)%\s+(\d+)%\)/.exec(str || '');
+  if (m) return { h: +m[1], s: +m[2], l: +m[3] };
+  m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(str || '');
+  if (!m) return null;
+  const r = +m[1] / 255, g = +m[2] / 255, b = +m[3] / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  const l = (max + min) / 2;
+  const sl = l === 0 || l === 1 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  return { h, s: Math.round(sl * 100), l: Math.round(l * 100) };
+}
+
+const lab = document.getElementById('lab');
+const results = document.getElementById('results');
+const tiles = [];
+CASES.forEach((c) => {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const ico = document.createElement('div');
+  ico.className = 'ico';
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  tile.append(ico);
+  const info = document.createElement('div');
+  info.className = 'info';
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = c.name;
+  info.append(name);
+  installIcon(ico, { id: c.name, title: c.name, url: 'https://lab.example/' + encodeURIComponent(c.name), icon: c.icon });
+  card.append(tile, info);
+  lab.append(card);
+  tiles.push({ c, tile, ico });
+});
+
+setTimeout(() => {
+  let pass = 0;
+  const lines = tiles.map(({ c, tile, ico }, i) => {
+    const img = ico.querySelector('img');
+    const ok = c.check(tile, img);
+    if (ok) pass++;
+    return `${ok ? '✓' : '✗'} [${i + 1}] ${c.name}\n   tile=${tile.style.background || '(无底色)'} wht=${!!(img && img.classList.contains('wht'))} img=${!!img}`;
+  });
+  results.innerHTML = `<b>${pass}/${CASES.length} 通过</b>\n` + lines.join('\n');
+  document.title = `${pass}/${CASES.length} 取色自检`;
+}, 1200);
+
+/* ---------- 开关 ---------- */
+document.querySelectorAll('.pv-seg').forEach((seg) => {
+  seg.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === btn));
+    const v = btn.dataset.v, key = seg.dataset.key;
+    if (key === 'theme') document.documentElement.dataset.theme = v;
+    if (key === 'density') {
+      document.body.classList.toggle('layout-compact', v === 'compact');
+      document.body.classList.toggle('layout-comfortable', v === 'comfortable');
+    }
+    if (key === 'edit') document.body.classList.toggle('editing', v === 'on');
+  });
+});
+
+/* 地址参数：?theme=light&density=compact&edit=1 */
+const qs = new URLSearchParams(location.search);
+if (qs.get('theme') === 'light') document.querySelector('.pv-seg[data-key="theme"] [data-v="light"]').click();
+if (qs.get('density') === 'compact') document.querySelector('.pv-seg[data-key="density"] [data-v="compact"]').click();
+if (qs.get('density') === 'comfortable') document.querySelector('.pv-seg[data-key="density"] [data-v="comfortable"]').click();
+if (qs.get('edit') === '1') document.querySelector('.pv-seg[data-key="edit"] [data-v="on"]').click();
+</script>
+</body>
+</html>

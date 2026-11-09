@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="img-src 'none'">
+<title>1.3.2 Dock 实时调频 · 自检</title>
+<link rel="stylesheet" href="../css/style.css">
+<style>
+  body { padding: 28px 32px; font-family: var(--font-sans, system-ui), sans-serif; color: var(--text, #eee); }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 6px; }
+  p.pv-lead { font-size: 13px; opacity: .72; margin: 0 0 22px; line-height: 1.7; }
+  .pv-dock { position: static; margin: 18px 0 24px; min-height: 64px; display: flex; gap: 10px; align-items: center; }
+  #out { font: 12px/1.75 ui-monospace, Menlo, monospace; white-space: pre-wrap; padding: 16px 18px; border-radius: 12px; background: rgba(127,127,127,.12); }
+</style>
+</head>
+<body>
+<h1>1.3.2 · Dock 实时收录与调频</h1>
+<p class="pv-lead">这个页面加载线上真实的 <code>dock.js</code>：用一组固定的 7 个站点模拟点击，检查统计是否立刻反映到智能 Dock 的收录与排序，并核对新标签打开是否还在用户手势栈里。下方是真实渲染出来的 Dock。</p>
+<div id="dock" class="dock pv-dock"></div>
+<pre id="out">模块加载中…</pre>
+<script>document.getElementById('out').textContent = '模块加载中…';</script>
+
+<script type="module">
+import { state } from '../js/core/state.js';
+import { renderDock, trackSiteUse, applyDockMode } from '../js/features/dock.js';
+
+const $ = (s) => document.querySelector(s);
+const out = [];
+const flush = () => { $('#out').textContent = out.join('\n') + '\n…运行中'; };
+const ok = (name, cond, extra = '') => { out.push(`${cond ? '✓' : '✗'} ${name}${extra ? '  → ' + extra : ''}`); flush(); };
+const wait = () => new Promise((r) => setTimeout(r, 0));
+const titles = () => [...document.querySelectorAll('#dock .dock-item')]
+  .map((el) => el.title.split(' · ')[0].split('\n')[0]);
+
+window.addEventListener('error', (e) => out.push('✗ 页面异常：' + e.message));
+
+try {
+  ok('[0] 真实模块加载完成', typeof renderDock === 'function' && !!state);
+
+  const SITES = ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((x) => ({
+    id: 's' + x, url: `https://${x.toLowerCase()}.example.com/`, title: '站点' + x
+  }));
+  state.data = {
+    settings: { dockMode: 'auto', dockBlocked: [], siteMode: 'standard', layout: 'standard' },
+    groups: [{ id: 'g1', name: '常用', sites: SITES }],
+    dock: [], stats: {}, todos: [], events: [], feeds: [], calfeeds: {}
+  };
+  state.activeGroupId = 'g1';
+  state.editMode = false;
+
+  /* 拦住真实跳转，只记录调用时机 */
+  const opened = [];
+  window.open = (url, target, feat) => { opened.push({ url, target, feat }); return null; };
+
+  applyDockMode();
+  renderDock();
+  ok('[1] 初始 stats 为空 → Dock 收起', $('#dock').classList.contains('empty'));
+
+  trackSiteUse('sB'); await wait();
+  ok('[2] 点一次 B → Dock 立刻收录', titles().join(',') === '站点B', titles().join(','));
+  ok('[3] 计数写入 stats，角标显示次数', state.data.stats.sB?.n === 1
+    && $('#dock .dock-item').title.includes('使用 1 次'));
+
+  trackSiteUse('sA'); trackSiteUse('sA'); trackSiteUse('sA'); await wait();
+  ok('[4] A 点 3 次后升到第一位（调频）', titles().join(',') === '站点A,站点B', titles().join(','));
+
+  /* 真点击 Dock 图标：同步手势栈是这次修复的另一半 */
+  opened.length = 0;
+  $('#dock .dock-item').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  ok('[5] 点击后 window.open 同步发生（不再被 .finally 推迟）', opened.length === 1);
+  ok('[6] 打开参数仍是 _blank + noopener', opened[0]?.url.includes('a.example.com')
+    && opened[0]?.target === '_blank' && opened[0]?.feat === 'noopener');
+  ok('[7] Dock 自身点击也计入统计', state.data.stats.sA.n === 4);
+  await wait();
+  ok('[8] 点击后 Dock 仍按次数排序', titles().join(',') === '站点A,站点B', titles().join(','));
+
+  state.editMode = true;
+  opened.length = 0;
+  $('#dock .dock-item').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  ok('[9] 编辑态点击不打开、不计数', opened.length === 0 && state.data.stats.sA.n === 4);
+  state.editMode = false;
+
+  ['sC', 'sD', 'sE', 'sF', 'sG'].forEach((id) => { trackSiteUse(id); trackSiteUse(id); });
+  await wait();
+  ok('[10] 超过 5 个站 → 只留 Top5', document.querySelectorAll('#dock .dock-item').length === 5);
+  ok('[11] 次数最高者排第一，次数最低者被挤掉',
+    titles()[0] === '站点A' && !titles().includes('站点B'), titles().join(','));
+
+  state.data.settings.dockMode = 'manual';
+  state.data.dock = [{ groupId: 'g1', siteId: 'sB' }];
+  renderDock();
+  const before = $('#dock .dock-item');
+  const nBefore = state.data.stats.sF.n;
+  trackSiteUse('sF'); await wait();
+  ok('[12] 手动模式：统计照记（切回智能时能用）', state.data.stats.sF.n === nBefore + 1);
+  ok('[13] 手动模式：不重建 Dock DOM', $('#dock .dock-item') === before);
+
+  state.data.settings.dockMode = 'auto';
+  state.data.settings.dockBlocked = ['g1:sA'];
+  renderDock();
+  ok('[14] 已屏蔽站点不进智能 Dock', !titles().includes('站点A'), titles().join(','));
+
+  /* 源码一致性：卡片点击与 Dock 两处点击都得是同步链路 */
+  try {
+    const textOf = (p) => Promise.race([
+      fetch(p).then((r) => r.text()),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('读取超时')), 1200))
+    ]);
+    const card = await textOf('../js/features/sidebar.js');
+    const dock = await textOf('../js/features/dock.js');
+    const syncPair = /trackSiteUse\(site\.id\);\s*window\.open\(/;
+    ok('[15] 卡片点击：记账与打开同一同步块', syncPair.test(card)
+      && !/\.finally\(\(\)\s*=>\s*\{\s*window\.open\(/.test(card));
+    ok('[16] Dock 两处点击均为同步链路',
+      (dock.match(new RegExp(syncPair.source, 'g')) || []).length === 2);
+    ok('[17] trackSiteUse 会在微任务里重绘智能 Dock',
+      /Promise\.resolve\(\)\.then\(\(\)\s*=>\s*\{\s*if \(isAuto\(\)\) renderDock\(\);\s*\}\)/.test(dock));
+  } catch (e) {
+    out.push('… 源码检查跳过（file:// 读取受限）：' + e.message);
+  }
+} catch (e) {
+  out.push('✗ 模块加载失败：' + e.message);
+}
+
+const pass = out.filter((x) => x.startsWith('✓')).length;
+const total = out.filter((x) => x.startsWith('✓') || x.startsWith('✗')).length;
+$('#out').textContent = out.join('\n') + `\n\n${pass}/${total} 通过`;
+document.title = `${pass}/${total} 通过 · 1.3.2 Dock 自检`;
+</script>
+</body>
+</html>

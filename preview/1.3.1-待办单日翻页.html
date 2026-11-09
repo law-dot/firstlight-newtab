@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>1.3.1 待办单日翻页 · 自检</title>
+<link rel="stylesheet" href="../css/style.css">
+<style>
+  body { display: block; padding: 24px; }
+  .wrap { width: 300px; margin: 0 auto; }
+  #out { margin-top: 18px; font: 12px/1.6 monospace; white-space: pre-wrap; color: inherit; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <button id="todoFab" type="button"><span id="todoBadge" hidden></span></button>
+  <aside class="todo" id="todoPanel">
+    <div class="todo-cal" id="todoCal">
+      <button aria-label="前一天" class="todo-cal-nav prev" id="todoCalPrev" title="前一天（←）" type="button">
+        <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+      </button>
+      <button aria-label="后一天" class="todo-cal-nav next" id="todoCalNext" title="后一天（→）" type="button">
+        <svg viewBox="0 0 24 24"><path d="M10 6l6 6-6 6"/></svg>
+      </button>
+      <div class="todo-cal-rings"><i></i><i></i></div>
+      <div class="todo-cal-ym" id="todoCalYm"></div>
+      <div class="todo-cal-day" id="todoCalDay"></div>
+      <div class="todo-cal-wk" id="todoCalWk"></div>
+      <div class="todo-cal-lunar" id="todoCalLunar"></div>
+      <button class="todo-cal-back" hidden id="todoCalBack" title="回到今天" type="button">回到今天</button>
+      <div class="todo-cal-feeds" id="todoCalFeeds" hidden>
+        <ul class="todo-cal-feed-list" id="todoCalFeedList"></ul>
+        <button class="todo-cal-feed-more" id="todoCalFeedMore" type="button" hidden></button>
+      </div>
+    </div>
+    <div class="todo-scroll">
+      <ul class="todo-timeline" id="todoTimeline" hidden></ul>
+      <div class="todo-section" id="todoSection" hidden>
+        <div class="todo-section-title">待办 <span class="todo-left" id="todoLeft"></span></div>
+        <ul class="todo-list" id="todoList"></ul>
+      </div>
+      <div class="todo-empty" id="todoEmpty" hidden>今天没有安排</div>
+    </div>
+    <button class="todo-add-btn" id="todoAddBtn" type="button">＋ 添加</button>
+    <form class="todo-add-form" hidden id="todoAddForm">
+      <div class="seg" id="todoAddSeg">
+        <button class="on" data-val="todo" type="button">待办</button>
+        <button data-val="event" type="button">日程</button>
+      </div>
+      <input id="todoAddText" maxlength="80" placeholder="要做什么" required type="text">
+      <div class="todo-add-row" id="todoAddTimeRow" hidden>
+        <input aria-label="时间" id="todoAddTime" type="time">
+      </div>
+      <div class="todo-add-row">
+        <input aria-label="日期" id="todoAddDate" type="date">
+      </div>
+      <div class="todo-add-actions">
+        <button class="btn primary small" type="submit">保存</button>
+        <button class="btn small" id="todoAddCancel" type="button">取消</button>
+      </div>
+    </form>
+  </aside>
+</div>
+<pre id="out"></pre>
+
+<script type="module">
+import { state } from '../js/core/state.js';
+import { bindTodo, renderTodo } from '../js/features/todo.js';
+import { todayIso } from '../js/features/agenda.js';
+
+const today = todayIso();
+const d = (n) => {
+  const [y, m, dd] = today.split('-').map(Number);
+  const dt = new Date(y, m - 1, dd);
+  dt.setDate(dt.getDate() + n);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+};
+
+state.data = {
+  settings: {},
+  groups: [], dock: [], feeds: [], calfeeds: {}, stats: {},
+  todos: [
+    { id: 't1', text: '无日期待办（今日应显示）', done: false, date: '' },
+    { id: 't2', text: '昨天没做完（今日累积显示）', done: false, date: d(-1) },
+    { id: 't3', text: '后天的安排（只在后天视图出现）', done: false, date: d(2) },
+    { id: 't4', text: '大前天已完成（在那天视图应划线）', done: true, date: d(-3) }
+  ],
+  events: [
+    { id: 'e1', date: today, text: '今日站会', time: '09:30' },
+    { id: 'e2', date: d(1), text: '明天交稿', time: '14:00' }
+  ]
+};
+
+bindTodo();
+renderTodo();
+
+const $ = (s) => document.querySelector(s);
+const out = [];
+const ok = (name, cond) => out.push(`${cond ? '✓' : '✗'} ${name}`);
+
+function snapshot() {
+  return {
+    day: $('#todoCalDay').textContent,
+    backVisible: !$('#todoCalBack').hidden,
+    timeline: [...$('#todoTimeline').children].map((li) => li.querySelector('.text').textContent),
+    todos: [...$('#todoList').children].map((li) => ({
+      t: li.querySelector('.text').textContent,
+      done: li.classList.contains('done')
+    })),
+    empty: $('#todoEmpty').textContent,
+    badge: $('#todoBadge').textContent
+  };
+}
+
+/* 1) 今天 */
+let s = snapshot();
+ok('今日视图：撕页日期=今天', s.day === String(new Date().getDate()));
+ok('今日视图：回到今天按钮隐藏', !s.backVisible);
+ok('今日视图：时间轴=今日站会', s.timeline.join() === '今日站会');
+ok('今日视图：待办累积 2 条（无日期+昨天）', s.todos.length === 2 && !s.todos.some((x) => x.t.includes('后天')));
+ok('今日视图：角标=3（全部未完成，含未来的）', s.badge === '3');
+
+/* 2) 翻到明天 */
+$('#todoCalNext').click();
+s = snapshot();
+ok('明日视图：撕页日期=明天', s.day === String(new Date(Date.now() + 864e5).getDate()));
+ok('明日视图：时间轴=明天交稿', s.timeline.join() === '明天交稿');
+ok('明日视图：回到今天按钮可见', s.backVisible);
+ok('明日视图：待办区不显示今日累积', s.todos.length === 0);
+
+/* 3) 再翻到后天 */
+$('#todoCalNext').click();
+s = snapshot();
+ok('后天视图：待办=后天的安排', s.todos.length === 1 && s.todos[0].t.includes('后天'));
+
+/* 4) 左键退回明天，再翻到空日（+3） */
+$('#todoCalPrev').click();
+$('#todoCalNext').click(); $('#todoCalNext').click();
+s = snapshot();
+ok('空日视图：空态文案=这一天没有安排', s.empty === '这一天没有安排');
+
+/* 5) 回到今天 */
+$('#todoCalBack').click();
+s = snapshot();
+ok('回到今天：按钮重新隐藏', !s.backVisible);
+ok('回到今天：待办恢复累积 2 条', s.todos.length === 2);
+ok('回到今天：空态文案=今天没有安排', s.empty === '今天没有安排');
+
+/* 6) 键盘 ←/→（面板未开时不应响应） */
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+s = snapshot();
+ok('面板未开：方向键不翻页', !s.backVisible);
+document.body.classList.add('todo-mode-docked');
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+s = snapshot();
+ok('docked 模式：→ 翻到明天', s.backVisible && s.timeline.join() === '明天交稿');
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+s = snapshot();
+ok('docked 模式：← 翻回今天', !s.backVisible);
+document.body.classList.remove('todo-mode-docked');
+
+/* 7) 添加表单默认日期跟随视图 */
+document.querySelector('#todoCalNext').click();
+$('#todoAddBtn').hidden = false;
+$('#todoAddBtn').click();
+ok('翻到明天后添加表单默认日期=明天', $('#todoAddDate').value === d(1));
+$('#todoAddCancel').click();
+
+/* 8) 已完成样式（翻到大前天） */
+$('#todoCalPrev').click(); // 今天
+$('#todoCalPrev').click(); // 昨天
+$('#todoCalPrev').click(); // 前天
+$('#todoCalPrev').click(); // 大前天
+s = snapshot();
+ok('大前天视图：已完成待办带 .done 划线', s.todos.length === 1 && s.todos[0].done === true);
+const pass = out.filter((x) => x.startsWith('✓')).length;
+$('#out').textContent = out.join('\n') + `\n\n${pass}/${out.length} 通过`;
+document.title = `${pass}/${out.length}`;
+</script>
+</body>
+</html>

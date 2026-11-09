@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>1.3.3 天气动效 · 预览与自检</title>
+<link rel="stylesheet" href="../css/style.css">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  :root { --bg-blur: 0px; }
+  /* 预览页固定显示动效层，不受 0.7s 淡入影响 */
+  .fx { opacity: 1 !important; transition: none !important; }
+  .pv-tag {
+    position: fixed; left: 18px; top: 18px; z-index: 9;
+    padding: 8px 13px; border-radius: 10px;
+    background: rgba(12,16,24,.72); color: #eef3ff;
+    font: 12px/1.6 -apple-system, "PingFang SC", sans-serif;
+    border: 1px solid rgba(255,255,255,.14);
+  }
+  #out {
+    position: fixed; right: 18px; bottom: 18px; z-index: 9;
+    max-width: 470px; max-height: 62vh; overflow: auto;
+    padding: 12px 14px; border-radius: 10px;
+    background: rgba(12,16,24,.88); color: #dfe9ff;
+    font: 11px/1.65 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body class="fx-on">
+<div class="bg" id="bg"></div>
+<canvas class="fx" id="fx" aria-hidden="true"></canvas>
+<div class="pv-tag" id="tag"></div>
+<pre id="out" hidden></pre>
+
+<script type="module">
+import { state } from '../js/core/state.js';
+import { fx, fxBuild, fxSize, fxPaint, fxKind } from '../js/features/weather.js';
+
+/* ---------- 地址参数 ----------
+   wx   = 113 晴 / 293 小雨 / 323 小雪 / 299 中雨 / 329 中雪
+   bg   = white 纯亮 / light 暖阳渐变 / mid 深海 / dark 暮色
+   t    = 动画时刻（秒），钉住时间才能改前改后对比
+   check= 1 显示自检断言                                  */
+const qs = new URLSearchParams(location.search);
+const wx = Number(qs.get('wx') || 113);
+const bgKey = qs.get('bg') || 'dark';
+const T = Number(qs.get('t') || 3.2);
+const CHECK = qs.get('check') === '1';
+
+/* 亮壁纸配浅色主题、暗壁纸配深色主题，贴近真实使用：
+   .fx 层的整屏渐变压暗强度由主题决定，浅色主题压得最少，正是光晕最看不见的场景 */
+document.documentElement.dataset.theme =
+  qs.get('theme') || (bgKey === 'white' || bgKey === 'light' ? 'light' : 'dark');
+
+const BG = {
+  white: { image: 'none',                                        color: '#f4f7fc', label: '纯亮底 #f4f7fc' },
+  light: { image: 'linear-gradient(160deg, #ffecd2 0%, #fcb69f 100%)', color: '#0b0e16', label: '暖阳渐变（亮）' },
+  mid:   { image: 'linear-gradient(160deg, #0f2027 0%, #203a43 50%, #2c5364 100%)', color: '#0b0e16', label: '深海渐变（中）' },
+  dark:  { image: 'linear-gradient(160deg, #241b47 0%, #141a2e 55%, #0b0e16 100%)', color: '#0b0e16', label: '暮色渐变（暗）' }
+};
+const WX_NAME = { 113: '晴', 293: '小雨', 323: '小雪', 299: '中雨', 329: '中雪' };
+const cur = BG[bgKey] || BG.dark;
+
+function setBg(key) {
+  const b = BG[key] || BG.dark;
+  const el = document.getElementById('bg');
+  el.style.backgroundImage = b.image;
+  el.style.backgroundColor = b.color;
+}
+setBg(bgKey);
+
+document.getElementById('tag').textContent =
+  `1.3.3 天气动效 · ${WX_NAME[wx] || wx} · ${cur.label} · t=${T}s`;
+
+/* ---------- 驱动真实 weather.js ----------
+   不启动 rAF：手动设 canvas → fxSize → fxBuild → fxPaint 画钉住的一帧。
+   这样同一参数每次截图像素完全一致，改前/改后才有可比性。 */
+state.data = {
+  settings: { fxMode: 'always', weather: { code: wx, wind: 8, windDir: 270 } },
+  groups: [], dock: [], feeds: [], calfeeds: {}, todos: [], events: [], stats: {}
+};
+
+const canvas = document.getElementById('fx');
+fx.canvas = canvas;
+fx.ctx = canvas.getContext('2d', { willReadFrequently: true });
+fxSize();
+fxBuild(fxKind());
+
+// ?shade=0 关掉晴天的局部暗场，用来对照「有暗场 / 没暗场」两版
+if (qs.get('shade') === '0') { fx.shadeLock = true; fx.wallShade = 0; fx.shadeAt = 1e9; }
+
+/* 只画 t 这一帧会偏稀疏：粒子初值铺在 1.6W × 2.4H 的范围里，得落下几秒才填满屏幕。
+   所以先按 30fps 把前 t 秒走一遍（确定性，不含随机），再画定格的这一帧 —— 截图才等于真实观感。 */
+function paintTo(t) {
+  const dt = 1 / 30;
+  for (let s = 0; s < t; s += dt) fxPaint(s, dt);
+  fxPaint(t, dt);
+}
+paintTo(T);
+
+/* ---------- 自检 ----------
+   全部读真实模块的运行时数据（fx.parts / fx.sprites / fx.wallShade），
+   不 fetch 源码：file:// 下 fetch 会挂住整个页面，而且读实际粒子比 grep 常量更可信。 */
+if (CHECK) {
+  const out = [];
+  const ok = (name, cond, extra = '') => out.push(`${cond ? '✓' : '✗'} ${name}${extra ? '  → ' + extra : ''}`);
+  const spec0 = fxKind();
+  const build = (spec) => { fxBuild(spec); return fx.parts; };
+  const peak = (arr, k) => Math.max(...arr.map((p) => p[k]));
+
+  // ① 雨雪分级：只提 light 级，中雨 / 中雪一格不动
+  const r0 = build('rain:0').rain, r1 = build('rain:1').rain;
+  const s0 = build('snow:0').snow, s1 = build('snow:1').snow;
+  ok('[1] 小雨根数 ≥95', r0.length >= 95, `n=${r0.length}`);
+  ok('[2] 小雨最长雨丝 ≥24px', peak(r0, 'len') >= 24, `max=${peak(r0, 'len').toFixed(1)}`);
+  ok('[3] 小雨最亮 α ≥0.50', peak(r0, 'a') >= 0.50, `max=${peak(r0, 'a').toFixed(2)}`);
+  ok('[4] 小雪片数 ≥150（含近景）', s0.length >= 150, `n=${s0.length}`);
+  ok('[5] 小雪最大半径 ≥3.4px', peak(s0, 'r') >= 3.4, `max=${peak(s0, 'r').toFixed(1)}`);
+  ok('[6] 小雪最亮 α ≥0.85', peak(s0, 'a') >= 0.85, `max=${peak(s0, 'a').toFixed(2)}`);
+  ok('[7] 小雪有近景大雪花', s0.filter((p) => p.r > 5).length >= 3, `近景=${s0.filter((p) => p.r > 5).length}`);
+  ok('[8] 中雨 / 中雪未被串改', r1.length === 180 && s1.length === 200, `midRain=${r1.length} midSnow=${s1.length}`);
+  ok('[9] 中雨仍明显密于小雨', r1.length > r0.length * 1.5, `${r0.length} → ${r1.length}`);
+
+  // ② 亮底可见性：雨丝与雪片的雪碧图里必须真的有冷暗像素
+  function darkPixels(cv) {
+    if (!cv) return -1;
+    const d = cv.getContext('2d', { willReadFrequently: true })
+      .getImageData(0, 0, cv.width, cv.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] > 20 && d[i] < 120 && d[i + 1] < 130 && d[i + 2] < 160) n++;
+    }
+    return n;
+  }
+  build('rain:0');
+  ok('[10] 雨丝雪碧图带冷暗轮廓', darkPixels(fx.sprites.rain) > 0, `${darkPixels(fx.sprites.rain)} px`);
+  build('snow:0');
+  ok('[11] 雪片雪碧图带冷暗轮廓', darkPixels(fx.sprites.flake) > 0, `${darkPixels(fx.sprites.flake)} px`);
+
+  // ③ 晴天局部暗场：关键是「铺了之后亮底真的变暗」。
+  // 数暗像素个数不靠谱 —— 暗场上面又叠了 lighter 光晕，中心会被重新提亮，
+  // 但外围仍被压暗，整片区域的平均亮度才是人眼看到的东西。
+  build('sun');
+  ok('[12] 晴天烘焙了暗场雪碧图', !!fx.sprites.flareShade);
+
+  const base = Math.min(canvas.width, canvas.height) * 0.78;
+  const sx = canvas.width * 0.76, sy = canvas.height * 0.17;   // t 漂移 < 2%，取标称位置够用
+  const rad = base * 0.55;
+
+  // 估算人眼看到的亮度：画布是透明层，按 alpha 合成到壁纸底色上再求加权亮度
+  function lumaAround(bgLuma) {
+    const x0 = Math.max(0, Math.round(sx - rad)), y0 = Math.max(0, Math.round(sy - rad));
+    const w = Math.min(canvas.width - x0, Math.round(rad * 2));
+    const h = Math.min(canvas.height - y0, Math.round(rad * 2));
+    const d = fx.ctx.getImageData(x0, y0, w, h).data;
+    let sum = 0, n = 0, painted = 0;
+    for (let i = 0; i < d.length; i += 16) {      // 每 4 像素采 1 点，够统计且快
+      const a = d[i + 3] / 255;
+      const l = (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      sum += l * a + bgLuma * (1 - a);
+      if (a > 0.02) painted++;
+      n++;
+    }
+    return { luma: sum / n, painted };
+  }
+
+  // 开关暗场的对照：锁住 wallShade=0 画一帧当基准，再放开重算画一帧作对比
+  function measure(key, bgLuma) {
+    setBg(key);
+    fx.shadeLock = true;
+    fx.wallShade = 0; fx.shadeAt = fx.t + 1e6;     // 节流条件 t-shadeAt<1 成立 → 一直返回 0
+    fxPaint(T);
+    const off = lumaAround(bgLuma);
+    fx.shadeLock = false;
+    fxPaint(T);                                    // 放开锁 → 按当前壁纸重算暗场
+    const on = lumaAround(bgLuma);
+    return { off, on, shade: fx.wallShade };
+  }
+  const white = measure('white', 0.96);            // #f4f7fc
+  const dark = measure('dark', 0.10);              // 暮色渐变中值
+  const dW = white.off.luma - white.on.luma;
+  const dD = dark.off.luma - dark.on.luma;
+
+  ok('[13] 壁纸亮度解析生效（亮 > 暗）', white.shade > dark.shade * 1.8,
+     `white=${white.shade.toFixed(3)} dark=${dark.shade.toFixed(3)}`);
+  ok('[14] 亮底太阳周围确实被压暗', dW > 0.012, `Δluma=${(dW * 100).toFixed(2)}%`);
+  ok('[15] 暗底几乎不压（不破坏夜间观感）', dD < dW * 0.45,
+     `亮Δ=${(dW * 100).toFixed(2)}% 暗Δ=${(dD * 100).toFixed(2)}%`);
+  ok('[16] 亮底那一帧确实画出了像素', white.on.painted > 2000, 'painted=' + white.on.painted);
+
+  // 恢复成地址参数指定的组合，别让自检把预览画面改掉
+  setBg(bgKey);
+  build(spec0);
+  paintTo(T);
+
+  const pass = out.filter((x) => x.startsWith('✓')).length;
+  const box = document.getElementById('out');
+  box.hidden = false;
+  box.textContent = out.join('\n') + `\n\n${pass}/${out.length} 通过`;
+  document.title = `1.3.3 自检 ${pass}/${out.length}`;
+}
+</script>
+</body>
+</html>
