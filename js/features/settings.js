@@ -5,7 +5,10 @@ import {
   normalize, makeDefault, clearWallpaper,
   loadData, loadSyncConf, saveSyncConf
 } from '../core/store.js';
-import { initSync, isSyncAvailable, overwriteLocalFromRemote } from '../core/sync.js';
+import {
+  initSync, isSyncAvailable, overwriteLocalFromRemote,
+  syncNow, getSyncStatus, testWebdav, davErrText
+} from '../core/sync.js';
 import { renderWeather, WEATHER_TTL, fxSync } from './weather.js';
 import { applyWallpaper } from './wallpaper.js';
 import { applyTodoMode } from './todo.js';
@@ -176,7 +179,16 @@ function paintSyncUI() {
   );
   const hint = $('#syncHint');
   const pullBtn = $('#btnSyncPull');
+  const davForm = $('#webdavForm');
+  const actions = $('#syncActions');
+  const status = $('#syncStatus');
   if (pullBtn) pullBtn.hidden = syncConf.mode !== 'browser';
+  if (davForm) davForm.hidden = syncConf.mode !== 'webdav';
+  if (actions) actions.hidden = syncConf.mode === 'off';
+  if (status) {
+    status.hidden = true;
+    status.textContent = '';
+  }
   if (syncConf.mode === 'browser') {
     const last = syncConf.lastSyncAt
       ? `上次同步：${new Date(syncConf.lastSyncAt).toLocaleString('zh-CN', {
@@ -187,15 +199,163 @@ function paintSyncUI() {
         })}。`
       : '';
     hint.textContent = `经浏览器账号（Edge/Chrome）同步，数据会经过微软/谷歌服务器。${last}`;
+  } else if (syncConf.mode === 'webdav') {
+    hint.textContent = '经你自己的 WebDAV 网盘同步全量快照；打开新标签页时自动同步，也可点「立即同步」。';
   } else {
     hint.textContent = '数据只保存在本机，不上传任何服务器。';
   }
+  if (syncConf.mode === 'webdav' && davForm && document.activeElement?.id !== 'davUrl') {
+    const d = syncConf.webdav || {};
+    $('#davUrl').value = d.url || '';
+    $('#davUser').value = d.username || '';
+    $('#davPass').value = d.password || '';
+  }
+}
+
+/* ---- 同步状态面板：把「云端到底有没有数据」摆到明面上 ---- */
+function fmtBytes(n) {
+  return n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+}
+
+function fmtSide(tag, s) {
+  if (!s) return `${tag}：（空）`;
+  return `${tag}：${s.records} 条记录 · ${s.groups} 个分组 / ${s.sites} 个站点 · 待办 ${s.todos} · 日程 ${s.events} · 订阅源 ${s.feeds} · 约 ${fmtBytes(s.bytes)}`;
+}
+
+function formatSyncStatus(st) {
+  const lines = [];
+  const t = (ts) => (ts ? new Date(ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '从未');
+  if (st.mode === 'browser') {
+    lines.push(`模式：浏览器账号同步`, `扩展 ID：${st.extId || '（预览环境）'}`, `上次同步：${t(st.lastSyncAt)}`);
+    lines.push('');
+    lines.push(fmtSide('本机', st.local));
+    lines.push(fmtSide('云端', st.remote));
+    lines.push('');
+    if (st.error) lines.push('⚠ 云端读取失败（未登录账号？）');
+    else if (!st.remote || !st.remote.records) {
+      lines.push('⚠ 云端是空的：另一台设备要先在初见设置里开启同步并推送过，这里才有数据。');
+      lines.push('  两台设备的扩展 ID 必须一致（都是商店安装或都是本地加载）。');
+    } else if (st.remote.records !== st.local.records || st.remote.sites !== st.local.sites) {
+      lines.push('ℹ 两边数量不一致：点「立即同步」做一次双向合并即可。');
+    } else {
+      lines.push('✓ 两边一致。');
+    }
+  } else if (st.mode === 'webdav') {
+    lines.push(`模式：WebDAV`, `服务器：${st.url}`, `上次同步：${t(st.lastSyncAt)}`);
+    lines.push('');
+    lines.push(fmtSide('本机', st.local));
+    lines.push(fmtSide('云端', st.remote));
+    lines.push('');
+    if (st.error) lines.push(`⚠ 云端读取失败：${davErrText(st.error)}`);
+    else if (!st.remote) lines.push('云端还没有快照，保存并连接后会自动推上去。');
+    else {
+      lines.push(`快照时间：${t(st.remoteSavedAt)} · 来自设备 ${st.remoteDeviceId || '?'}`);
+      if (st.remoteDeviceId && st.remoteDeviceId !== st.deviceId) lines.push('（云端比本机新过的部分会在同步时并进来）');
+    }
+  } else {
+    lines.push('模式：未开启同步');
+  }
+  return lines.join('\n');
+}
+
+async function refreshSyncStatus() {
+  const el = $('#syncStatus');
+  el.hidden = false;
+  el.textContent = '正在读取…';
+  try {
+    const st = await getSyncStatus();
+    syncConf = await loadSyncConf();
+    paintSyncUI();          // 会按新模式重排表单（并清空 status 文本）
+    el.textContent = formatSyncStatus(st);
+    el.hidden = false;
+  } catch (err) {
+    el.textContent = `读取失败：${err?.message || err}`;
+  }
+}
+
+async function doSyncNow() {
+  toast('正在同步…');
+  const r = await syncNow();
+  if (!r.ok) {
+    toast(`同步失败：${davErrText(r.reason)}`);
+    return;
+  }
+  if (r.pulled) {
+    state.data = await loadData();
+    renderAll();
+    applyTheme();
+    await applyWallpaper();
+  }
+  syncConf = await loadSyncConf();
+  paintSyncUI();
+  toast(r.pulled ? '同步完成，本机已按云端更新' : '同步完成');
+}
+
+/* ---- WebDAV 配置 ---- */
+async function requestDavOrigin(url) {
+  if (typeof chrome === 'undefined' || !chrome.permissions?.request) return true; // 预览环境直接放行
+  const origin = `${new URL(url).origin}/*`;
+  return chrome.permissions.request({ origins: [origin] });
+}
+
+async function saveWebdav() {
+  const url = $('#davUrl').value.trim();
+  const username = $('#davUser').value.trim();
+  const password = $('#davPass').value;
+  if (!/^https?:\/\//i.test(url)) {
+    toast('地址要以 http(s):// 开头，且指向一个目录');
+    return;
+  }
+  if (!(await requestDavOrigin(url))) {
+    toast('没有该域名的网络权限，无法连接');
+    return;
+  }
+  syncConf = { ...syncConf, mode: 'webdav', webdav: { url, username, password } };
+  await saveSyncConf(syncConf);
+  toast('正在连接并推送第一份快照…');
+  const r = await syncNow();
+  if (!r.ok) {
+    toast(`已保存配置，但同步失败：${davErrText(r.reason)}`, 4000);
+  } else {
+    toast(r.pulled ? '已连接，云端数据并入了本机' : '已连接，快照已推送到网盘');
+  }
+  syncConf = await loadSyncConf();
+  paintSyncUI();
+}
+
+async function testDav() {
+  const url = $('#davUrl').value.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    toast('地址要以 http(s):// 开头');
+    return;
+  }
+  if (!(await requestDavOrigin(url))) {
+    toast('没有该域名的网络权限');
+    return;
+  }
+  toast('正在测试连接…');
+  const r = await testWebdav({
+    url,
+    username: $('#davUser').value.trim(),
+    password: $('#davPass').value
+  });
+  if (!r.ok) toast(`连接失败：${davErrText(r.reason)}`, 4000);
+  else if (r.hasSnapshot) toast('连接成功，云端已有本插件的快照', 4000);
+  else toast('连接成功（云端还没有快照，保存后会推上去）', 4000);
 }
 
 async function setSyncMode(mode) {
   if (!syncConf || mode === syncConf.mode) return;
   if (mode === 'browser' && !isSyncAvailable()) {
     toast('当前预览环境不支持浏览器同步');
+    return;
+  }
+  // 还没填过 WebDAV 配置：先只切界面，填好「保存并连接」后再真正开同步
+  if (mode === 'webdav' && !syncConf.webdav) {
+    syncConf = { ...syncConf, mode: 'webdav' };
+    await saveSyncConf(syncConf);
+    paintSyncUI();
+    toast('填好地址和账号后，点「保存并连接」');
     return;
   }
   syncConf = { ...syncConf, mode };
@@ -210,7 +370,11 @@ async function setSyncMode(mode) {
   }
   syncConf = await loadSyncConf(); // initSync 可能更新了 lastSyncAt
   paintSyncUI();
-  toast(mode === 'browser' ? '已开启浏览器账号同步' : '已关闭同步');
+  toast(
+    mode === 'browser' ? '已开启浏览器账号同步'
+      : mode === 'webdav' ? '已开启 WebDAV 同步'
+      : '已关闭同步'
+  );
 }
 
 // 手动「以云端为准」：覆盖前先确认，避免误点丢数据
@@ -408,6 +572,10 @@ export function bindSettings() {
     btn.addEventListener('click', () => setSyncMode(btn.dataset.val));
   });
   $('#btnSyncPull')?.addEventListener('click', pullFromRemote);
+  $('#btnSyncNow')?.addEventListener('click', doSyncNow);
+  $('#btnSyncStatus')?.addEventListener('click', refreshSyncStatus);
+  $('#btnDavSave')?.addEventListener('click', saveWebdav);
+  $('#btnDavTest')?.addEventListener('click', testDav);
 
   $('#btnExport').addEventListener('click', exportData);
   $('#btnImport').addEventListener('click', () => $('#fileImport').click());

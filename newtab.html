@@ -332,10 +332,24 @@
       <div class="seg" id="syncSeg">
         <button data-val="off" type="button">关闭</button>
         <button data-val="browser" type="button">浏览器账号</button>
-        <button data-val="webdav" disabled title="后续版本提供" type="button">WebDAV</button>
+        <button data-val="webdav" type="button">WebDAV</button>
       </div>
       <p class="hint" id="syncHint">数据只保存在本机，不上传任何服务器。</p>
-      <button class="btn small" hidden id="btnSyncPull" type="button">用云端数据覆盖本机</button>
+      <div class="webdav-form" id="webdavForm" hidden>
+        <input id="davUrl" placeholder="目录地址，如 https://dav.jianguoyun.com/dav/chujian/">
+        <input id="davUser" autocomplete="off" placeholder="账号（坚果云填注册邮箱）">
+        <input id="davPass" type="password" placeholder="应用密码（坚果云在「账户信息→安全选项」生成）">
+        <div class="row">
+          <button class="btn small" id="btnDavSave" type="button">保存并连接</button>
+          <button class="btn small" id="btnDavTest" type="button">测试连接</button>
+        </div>
+      </div>
+      <div class="row" id="syncActions" hidden>
+        <button class="btn small" id="btnSyncNow" type="button">立即同步</button>
+        <button class="btn small" id="btnSyncStatus" type="button">查看同步状态</button>
+        <button class="btn small" hidden id="btnSyncPull" type="button">用云端覆盖本机</button>
+      </div>
+      <pre class="sync-status" id="syncStatus" hidden></pre>
     </section>
 
     <section class="field">

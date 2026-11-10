@@ -1,5 +1,6 @@
 // 同步引擎：本地优先，远程后端可插拔。
-// browser 后端 = chrome.storage.sync（Edge/Chrome 账号同步）；WebDAV 后端留待以后。
+// browser 后端 = chrome.storage.sync（Edge/Chrome 账号同步）；
+// webdav 后端 = 用户自己的 WebDAV 网盘（坚果云等），全量快照，见下方说明。
 // 同步配置只存本机（store.js 的 loadSyncConf），永不参与同步。
 //
 // 数据通路：store.js 的 loadUnits / saveUnit / removeUnit / removeUnits。
@@ -71,16 +72,32 @@ export function onSyncRemote(fn) {
 // 返回 true 表示从远端拉到了更新，调用方需要重新 loadData()
 export async function initSync() {
   conf = await loadSyncConf();
+  if (!conf.deviceId) {
+    conf.deviceId = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    await saveSyncConf(conf);
+  }
   unwatchRemote();
-  if (conf.mode !== 'browser' || !hasSync) return false;
-  const pulled = await initialMerge();
-  watchRemote();
-  return pulled;
+  if (conf.mode === 'browser' && hasSync) {
+    const pulled = await initialMerge();
+    watchRemote();
+    return pulled;
+  }
+  if (conf.mode === 'webdav') {
+    try {
+      const r = await webdavRound();
+      return !!r.pulled;
+    } catch (err) {
+      console.warn('webdav sync failed', err);
+      toast('WebDAV 同步失败，请检查网络或稍后在设置里重试');
+      return false;
+    }
+  }
+  return false;
 }
 
 // state.js persist() 保存成功后调用，参数是本次变更的存储键
 export function notifyChanged(changedUnits = []) {
-  if (conf.mode !== 'browser' || !hasSync) return;
+  if ((conf.mode !== 'browser' && conf.mode !== 'webdav') || !hasSync) return;
   for (const k of changedUnits) if (isOurs(k)) pendingPush.add(k);
   if (!pendingPush.size) return;
   clearTimeout(pushTimer);
@@ -142,46 +159,56 @@ async function reconcileGroups(indexRec, force = false) {
   return drop.length ? removeUnits(drop) : 0;
 }
 
+/* ---------- 远端记录并入本地（两个后端共用） ----------
+   返回 { pulled, toPush }：pulled = 本机有更新需要重载界面；
+   toPush = 本机更新的记录，调用方决定往哪个后端推。 */
+export async function pullMerge(remote) {
+  const local = await loadUnits();
+  let pulled = false;
+  const toPush = {};
+
+  const keys = new Set([...Object.keys(local), ...Object.keys(remote).filter(isOurs)]);
+  for (const key of keys) {
+    if (!isOurs(key) || key === GROUP_INDEX_KEY) continue; // 索引单独处理
+    const r = remote[key];
+    const l = local[key];
+    const rt = r?.updatedAt || 0;
+    const lt = l?.updatedAt || 0;
+    if (r && r.v != null && rt > lt) {
+      await saveUnit(key, r);
+      pulled = true;
+    } else if (l && l.v != null && lt > rt) {
+      toPush[key] = l;
+    }
+  }
+
+  const li = local[GROUP_INDEX_KEY] || null;
+  const ri = remote[GROUP_INDEX_KEY] || null;
+  if (li || ri) {
+    const merged = mergeIndex(li, ri);
+    if (sigOf(li) !== sigOf(merged)) {
+      await saveUnit(GROUP_INDEX_KEY, merged);
+      pulled = true;
+    }
+    if (sigOf(ri) !== sigOf(merged)) toPush[GROUP_INDEX_KEY] = merged;
+    if (li && ri) {
+      await dropTombstoned(merged);
+      await reconcileGroups(merged);
+      // 判定为「已删除」的分组记录别再推上去，否则云端永远留着垃圾
+      for (const id of Object.keys(merged.d || {})) delete toPush[gkey(id)];
+    }
+  }
+  return { pulled, toPush };
+}
+
 /* ---------- 启动合并：逐条记录比较 updatedAt，新者胜出 ---------- */
 async function initialMerge() {
   let pulled = false;
   try {
-    const [remote, local] = await Promise.all([chrome.storage.sync.get(null), loadUnits()]);
-    const keys = new Set([...Object.keys(local), ...Object.keys(remote).filter(isOurs)]);
-    const toPush = {};
-
-    for (const key of keys) {
-      if (!isOurs(key) || key === GROUP_INDEX_KEY) continue; // 索引单独处理
-      const r = remote[key];
-      const l = local[key];
-      const rt = r?.updatedAt || 0;
-      const lt = l?.updatedAt || 0;
-      if (r && r.v != null && rt > lt) {
-        await saveUnit(key, r);
-        pulled = true;
-      } else if (l && l.v != null && lt > rt) {
-        toPush[key] = l;
-      }
-    }
-
-    const li = local[GROUP_INDEX_KEY] || null;
-    const ri = remote[GROUP_INDEX_KEY] || null;
-    if (li || ri) {
-      const merged = mergeIndex(li, ri);
-      if (sigOf(li) !== sigOf(merged)) {
-        await saveUnit(GROUP_INDEX_KEY, merged);
-        pulled = true;
-      }
-      if (sigOf(ri) !== sigOf(merged)) toPush[GROUP_INDEX_KEY] = merged;
-      if (li && ri) {
-        await dropTombstoned(merged);
-        await reconcileGroups(merged);
-        // 判定为「已删除」的分组记录别再推上去，否则云端永远留着垃圾
-        for (const id of Object.keys(merged.d || {})) delete toPush[gkey(id)];
-      }
-    }
-
-    if (Object.keys(toPush).length) await pushRecords(toPush);
+    const remote = await chrome.storage.sync.get(null);
+    const res = await pullMerge(remote);
+    pulled = res.pulled;
+    if (Object.keys(res.toPush).length) await pushRecords(res.toPush);
   } catch (err) {
     console.warn('sync init failed', err);
     toast('同步初始化失败，请确认浏览器已登录账号');
@@ -196,6 +223,19 @@ async function pushPending() {
   const keys = [...pendingPush];
   pendingPush.clear();
   if (!keys.length) return;
+  if (conf.mode === 'webdav') {
+    // WebDAV 没有逐键写：一次「拉-合并-推」全量往返，把积压一次清掉
+    const r = await webdavRound();
+    if (!r.ok) {
+      for (const k of keys) pendingPush.add(k);
+      pushRetry = Math.min(pushRetry + 1, 5);
+      clearTimeout(pushTimer);
+      pushTimer = setTimeout(pushPending, Math.min(60000, PUSH_DEBOUNCE * 2 ** pushRetry));
+    } else {
+      pushRetry = 0;
+    }
+    return;
+  }
   const units = await loadUnits();
   const writes = {};
   for (const k of keys) if (units[k]) writes[k] = units[k];
@@ -359,4 +399,205 @@ async function applyRemote(touched, changes) {
   }
 
   if (pulled && remoteListener) remoteListener();
+}
+
+/* ================= WebDAV 后端 =================
+   与浏览器后端的本质差别：没有变更推送通道，也没有 8KB 配额压力。
+   所以走「全量快照」：一个 JSON 文件 = 全部 monk.* 记录（含订阅内容）。
+   每次同步 = 拉快照 → 按记录合并（与浏览器后端同一套 pullMerge）→ 把合并后的
+   完整快照传回去。**先拉后推**保证并发安全：另一台设备刚推的新数据不会
+   被本机的旧状态直接盖掉——本机先把它并进来，再上传合并结果。
+   快照文件本身就是备份：用户随时可以下载一份当离线保命符。 */
+const WEBDAV_FILE = 'firstlight-sync.json';
+
+// 设置页状态面板最近一次检查的缓存（webdavRound / davGet 顺手填）
+export let lastDavCheck = null;
+
+function fetchWithTimeout(url, ms, init) {
+  return Promise.race([
+    fetch(url, init),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  ]);
+}
+
+// 账号/密码可能是非 ASCII（中文密码），btoa 只认 Latin1，先过一遍 UTF-8
+function basicAuth(user, pass) {
+  const bytes = new TextEncoder().encode(`${user || ''}:${pass || ''}`);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return `Basic ${btoa(bin)}`;
+}
+
+function davUrl(dconf) {
+  const u = String(dconf?.url || '').trim();
+  if (!/^https?:\/\//i.test(u)) return null;
+  return u.endsWith('/') ? u : `${u}/`;
+}
+
+function davHeaders(dconf, extra = {}) {
+  return {
+    Authorization: basicAuth(dconf.username, dconf.password),
+    ...extra
+  };
+}
+
+async function davGet(dconf) {
+  const base = davUrl(dconf);
+  if (!base) return { error: 'badurl' };
+  try {
+    const res = await fetchWithTimeout(base + WEBDAV_FILE, 15000, {
+      headers: davHeaders(dconf)
+    });
+    if (res.status === 404) return { snapshot: null }; // 还没推过：合法的空桶
+    if (res.status === 401 || res.status === 403) return { error: 'auth' };
+    if (!res.ok) return { error: `http ${res.status}` };
+    const json = await res.json();
+    if (!json || json.app !== 'firstlight' || typeof json.records !== 'object') {
+      return { error: 'format' };
+    }
+    return { snapshot: json };
+  } catch (err) {
+    return { error: err.message === 'timeout' ? 'timeout' : 'network' };
+  }
+}
+
+async function davPut(dconf, body) {
+  const base = davUrl(dconf);
+  if (!base) return { error: 'badurl' };
+  const payload = JSON.stringify(body);
+  const putInit = { method: 'PUT', headers: davHeaders(dconf, { 'Content-Type': 'application/json' }), body: payload };
+  try {
+    let res = await fetchWithTimeout(base + WEBDAV_FILE, 20000, putInit);
+    if (res.status === 409) {
+      // 目录不存在：建目录后重试一次（坚果云等要求先建好同步目录）
+      await fetchWithTimeout(base, 15000, { method: 'MKCOL', headers: davHeaders(dconf) });
+      res = await fetchWithTimeout(base + WEBDAV_FILE, 20000, putInit);
+    }
+    if (res.status === 401 || res.status === 403) return { error: 'auth' };
+    if (!res.ok) return { error: `http ${res.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { error: err.message === 'timeout' ? 'timeout' : 'network' };
+  }
+}
+
+// 一轮完整同步：拉 → 合并 → 推。启动、保存防抖、手动按钮三个入口共用。
+async function webdavRound() {
+  const dconf = conf.webdav;
+  const got = await davGet(dconf);
+  if (got.error) {
+    lastDavCheck = { ok: false, error: got.error, at: Date.now() };
+    return { ok: false, reason: got.error };
+  }
+  let pulled = false;
+  if (got.snapshot) {
+    const res = await pullMerge(got.snapshot.records || {});
+    pulled = res.pulled;
+  }
+  const units = await loadUnits();
+  const put = await davPut(dconf, {
+    app: 'firstlight',
+    ver: 1,
+    savedAt: Date.now(),
+    deviceId: conf.deviceId || '',
+    records: units
+  });
+  if (put.error) {
+    lastDavCheck = { ok: false, error: put.error, at: Date.now() };
+    return { ok: false, reason: put.error };
+  }
+  conf.lastSyncAt = Date.now();
+  await saveSyncConf(conf);
+  lastDavCheck = { ok: true, at: Date.now() };
+  return { ok: true, pulled };
+}
+
+// 设置页「测试连接」：只读不写
+export async function testWebdav(dconf) {
+  const got = await davGet(dconf);
+  if (got.error) return { ok: false, reason: got.error };
+  return { ok: true, hasSnapshot: !!got.snapshot, savedAt: got.snapshot?.savedAt || 0 };
+}
+
+export function davErrText(reason) {
+  return (
+    {
+      badurl: '地址不合法（要以 http(s):// 开头）',
+      auth: '账号或密码不对（坚果云要用应用密码，不是登录密码）',
+      network: '连不上服务器（检查地址、网络或防火墙）',
+      timeout: '连接超时',
+      format: '服务器上不是本插件的快照文件',
+      off: '同步未开启'
+    }[reason] || `未知错误（${reason}）`
+  );
+}
+
+/* ================= 状态诊断：把黑盒变白盒 ================= */
+function summarizeUnits(records) {
+  const s = { records: 0, groups: 0, sites: 0, todos: 0, events: 0, feeds: 0, calfeeds: 0, bytes: 0 };
+  for (const [k, rec] of Object.entries(records || {})) {
+    s.records += 1;
+    try {
+      s.bytes += encoder.encode(JSON.stringify(rec)).length + k.length;
+    } catch {
+      /* 忽略不可序列化 */
+    }
+    if (k.startsWith(GROUP_PREFIX) && k !== GROUP_INDEX_KEY) {
+      s.groups += 1;
+      s.sites += (rec?.v?.sites || []).length;
+    } else if (k === 'monk.todos.v1') s.todos = (rec?.v || []).length;
+    else if (k === 'monk.events.v1') s.events = (rec?.v || []).length;
+    else if (k === 'monk.feeds.v1') s.feeds = (rec?.v || []).length;
+    else if (k === 'monk.calfeeds.v1') s.calfeeds = Object.keys(rec?.v || {}).length;
+  }
+  return s;
+}
+
+// 面板数据：本机一把抓；云端按后端各查各的。读取失败不抛，把错误放结果里。
+export async function getSyncStatus() {
+  const units = await loadUnits();
+  const base = {
+    mode: conf.mode,
+    lastSyncAt: conf.lastSyncAt || 0,
+    deviceId: conf.deviceId || '',
+    local: summarizeUnits(units)
+  };
+  if (conf.mode === 'browser' && hasSync) {
+    try {
+      const remote = await chrome.storage.sync.get(null);
+      const ours = {};
+      for (const [k, v] of Object.entries(remote)) if (isOurs(k)) ours[k] = v;
+      return { ...base, extId: chrome.runtime.id || '', remote: summarizeUnits(ours) };
+    } catch (err) {
+      console.warn('sync status failed', err);
+      return { ...base, extId: chrome.runtime.id || '', error: 'read-failed' };
+    }
+  }
+  if (conf.mode === 'webdav') {
+    const got = await davGet(conf.webdav || {});
+    lastDavCheck = { ok: !got.error, error: got.error, at: Date.now() };
+    return {
+      ...base,
+      url: conf.webdav?.url || '',
+      remote: got.snapshot ? summarizeUnits(got.snapshot.records || {}) : null,
+      remoteSavedAt: got.snapshot?.savedAt || 0,
+      remoteDeviceId: got.snapshot?.deviceId || '',
+      error: got.error
+    };
+  }
+  return base;
+}
+
+/* ================= 手动同步（两个后端通用） ================= */
+export async function syncNow() {
+  if (conf.mode === 'browser' && hasSync) {
+    const pulled = await initialMerge();
+    clearTimeout(pushTimer);
+    await pushPending(); // 把积压的待推记录立即清掉
+    return { ok: true, pulled };
+  }
+  if (conf.mode === 'webdav') {
+    return webdavRound();
+  }
+  return { ok: false, reason: 'off' };
 }
