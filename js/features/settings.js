@@ -7,7 +7,8 @@ import {
 } from '../core/store.js';
 import {
   initSync, isSyncAvailable, overwriteLocalFromRemote,
-  syncNow, getSyncStatus, testWebdav, davErrText
+  syncNow, getSyncStatus, testWebdav, davErrText,
+  reloadSyncConf, diagnoseWebdav
 } from '../core/sync.js';
 import { renderWeather, WEATHER_TTL, fxSync } from './weather.js';
 import { applyWallpaper } from './wallpaper.js';
@@ -204,8 +205,10 @@ function paintSyncUI() {
   } else {
     hint.textContent = '数据只保存在本机，不上传任何服务器。';
   }
-  if (syncConf.mode === 'webdav' && davForm && document.activeElement?.id !== 'davUrl') {
-    const d = syncConf.webdav || {};
+  // 回填只在「没在用键盘编辑」时做：否则用户正打着密码，一次状态刷新就把输入清空
+  const editing = ['davUrl', 'davUser', 'davPass'].includes(document.activeElement?.id);
+  if (syncConf.mode === 'webdav' && davForm && !editing && syncConf.webdav) {
+    const d = syncConf.webdav;
     $('#davUrl').value = d.url || '';
     $('#davUser').value = d.username || '';
     $('#davPass').value = d.password || '';
@@ -277,7 +280,9 @@ async function doSyncNow() {
   toast('正在同步…');
   const r = await syncNow();
   if (!r.ok) {
-    toast(`同步失败：${davErrText(r.reason)}`);
+    toast(`同步失败：${davErrText(r.reason)}`, 5000);
+    // WebDAV 模式下顺手把诊断摊开，省得用户再点一次
+    if (syncConf?.mode === 'webdav' && $('#davUrl')?.value) await runDavDiag(true);
     return;
   }
   if (r.pulled) {
@@ -292,10 +297,25 @@ async function doSyncNow() {
 }
 
 /* ---- WebDAV 配置 ---- */
+// 必须在点击事件的第一层调用（用户手势）：先 contains 再 request 会因为中间 await
+// 过一次异步，手势失效，Chrome 直接拒绝授权。对已授予的 origin，request 会立即返回 true。
 async function requestDavOrigin(url) {
   if (typeof chrome === 'undefined' || !chrome.permissions?.request) return true; // 预览环境直接放行
-  const origin = `${new URL(url).origin}/*`;
-  return chrome.permissions.request({ origins: [origin] });
+  let origin;
+  try {
+    origin = `${new URL(url).origin}/*`;
+  } catch {
+    return false;
+  }
+  try {
+    return await chrome.permissions.request({ origins: [origin] });
+  } catch {
+    try {
+      return await chrome.permissions.contains({ origins: [origin] });
+    } catch {
+      return false;
+    }
+  }
 }
 
 async function saveWebdav() {
@@ -312,10 +332,15 @@ async function saveWebdav() {
   }
   syncConf = { ...syncConf, mode: 'webdav', webdav: { url, username, password } };
   await saveSyncConf(syncConf);
+  // 关键：同步引擎自己也缓存了一份 conf。不刷新它，它仍用旧配置（甚至没有账号密码），
+  // 于是「测试连接成功」之后紧接着的第一次同步就会失败。
+  await reloadSyncConf();
   toast('正在连接并推送第一份快照…');
   const r = await syncNow();
   if (!r.ok) {
-    toast(`已保存配置，但同步失败：${davErrText(r.reason)}`, 4000);
+    toast(`已保存配置，但同步失败：${davErrText(r.reason)}`, 5000);
+    // 失败别让用户猜，直接把诊断结果摊开
+    await runDavDiag(true);
   } else {
     toast(r.pulled ? '已连接，云端数据并入了本机' : '已连接，快照已推送到网盘');
   }
@@ -333,15 +358,45 @@ async function testDav() {
     toast('没有该域名的网络权限');
     return;
   }
-  toast('正在测试连接…');
-  const r = await testWebdav({
-    url,
+  const username = $('#davUser').value.trim();
+  const password = $('#davPass').value;
+  if (!username || !password) {
+    toast('账号和密码都要填（坚果云：注册邮箱 + 应用密码）', 4000);
+    return;
+  }
+  toast('正在测试连接（读写各测一次）…');
+  const r = await testWebdav({ url, username, password });
+  if (!r.ok) {
+    toast(`连接失败：${davErrText(r.reason)}`, 5000);
+    await runDavDiag(false);
+    return;
+  }
+  const note = r.probeBlocked
+    ? '（临时文件被网盘拒收，已改用快照路径验证可写）'
+    : '';
+  toast(
+    r.hasSnapshot
+      ? `连接成功：能读能写，云端已有本插件的快照${note}`
+      : `连接成功：能读能写，云端还没有快照（保存后会推上去）${note}`,
+    4500
+  );
+}
+
+/* 诊断：5 步逐条列在状态区，用户可以直接截图或复制发过来 */
+async function runDavDiag(auto) {
+  const el = $('#syncStatus');
+  if (!el) return;
+  const dconf = {
+    url: $('#davUrl').value.trim(),
     username: $('#davUser').value.trim(),
     password: $('#davPass').value
-  });
-  if (!r.ok) toast(`连接失败：${davErrText(r.reason)}`, 4000);
-  else if (r.hasSnapshot) toast('连接成功，云端已有本插件的快照', 4000);
-  else toast('连接成功（云端还没有快照，保存后会推上去）', 4000);
+  };
+  el.hidden = false;
+  el.textContent = '正在逐项诊断…';
+  const rows = await diagnoseWebdav(dconf);
+  const head = auto ? '同步失败，自动诊断：' : '连接诊断：';
+  el.textContent = [head, ...rows.map((r) => `${r.ok ? '✓' : '✗'} ${r.name}：${r.detail}`)].join('\n');
+  el.hidden = false;
 }
 
 async function setSyncMode(mode) {
@@ -576,6 +631,7 @@ export function bindSettings() {
   $('#btnSyncStatus')?.addEventListener('click', refreshSyncStatus);
   $('#btnDavSave')?.addEventListener('click', saveWebdav);
   $('#btnDavTest')?.addEventListener('click', testDav);
+  $('#btnDavDiag')?.addEventListener('click', () => runDavDiag(false));
 
   $('#btnExport').addEventListener('click', exportData);
   $('#btnImport').addEventListener('click', () => $('#fileImport').click());

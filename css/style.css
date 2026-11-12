@@ -1994,7 +1994,23 @@ body.drawer-open .drawer { transform: translateX(0); }
 
 .webdav-form .row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.webdav-form .hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted, #6b7280);
+}
+
+.webdav-form .hint code {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--input);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
 }
 
 .sync-status {

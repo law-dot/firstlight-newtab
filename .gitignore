@@ -1,21 +1,10 @@
-# 系统与编辑器
+# 系统杂物
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/
+
+# 打包产物（用 RELEASING.md 里的流程重新生成，不入库）
+*.zip
 
 # 临时文件
 *.log
 *.tmp
-
-# 打包产物
-*.zip
-*.tar.gz
-backups/
-
-# 开发草稿（不随仓库分发）
-weather-demo.html
-server.py
-
-# 依赖（本项目零依赖，留作兜底）
-node_modules/

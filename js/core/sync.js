@@ -95,6 +95,13 @@ export async function initSync() {
   return false;
 }
 
+// 设置页保存完 WebDAV 配置后必须调这个：否则本模块的 conf 还是上一次 initSync 读到的旧值
+// （典型症状：明明填对了账号密码，一点「保存并连接」就报「地址不合法」）
+export async function reloadSyncConf() {
+  conf = await loadSyncConf();
+  return conf;
+}
+
 // state.js persist() 保存成功后调用，参数是本次变更的存储键
 export function notifyChanged(changedUnits = []) {
   if ((conf.mode !== 'browser' && conf.mode !== 'webdav') || !hasSync) return;
@@ -227,6 +234,12 @@ async function pushPending() {
     // WebDAV 没有逐键写：一次「拉-合并-推」全量往返，把积压一次清掉
     const r = await webdavRound();
     if (!r.ok) {
+      // 认证类错误重试一万次也还是 401，而每一次 401 都可能换来一个原生登录弹窗。
+      // 遇到这类直接丢掉这批 key、停掉自动重试，等用户改好配置手动触发。
+      if (['auth', 'forbidden', 'nocred', 'badurl', 'redirect', 'html'].includes(r.reason)) {
+        pushRetry = 0;
+        return;
+      }
       for (const k of keys) pendingPush.add(k);
       pushRetry = Math.min(pushRetry + 1, 5);
       clearTimeout(pushTimer);
@@ -413,11 +426,61 @@ const WEBDAV_FILE = 'firstlight-sync.json';
 // 设置页状态面板最近一次检查的缓存（webdavRound / davGet 顺手填）
 export let lastDavCheck = null;
 
-function fetchWithTimeout(url, ms, init) {
-  return Promise.race([
-    fetch(url, init),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
-  ]);
+/* 401/403 之后进冷却：打开新标签页、每次改数据、每次点面板都会触发同步，
+   而每个 401 都可能换来一个浏览器原生的账号密码弹窗（那个空白的「登录」小窗）。
+   冷却期内一律不再发请求，只把上次的结论重复报出来；用户主动点「测试/立即同步/诊断」
+   时把冷却清零（那是有意为之的一次尝试，弹一次可以接受，弹一百次不行）。 */
+let davCooldownUntil = 0;
+let davCooldownReason = '';
+const DAV_COOLDOWN = 10 * 60 * 1000;
+
+function coolDown(reason) {
+  davCooldownUntil = Date.now() + DAV_COOLDOWN;
+  davCooldownReason = reason;
+}
+
+function davCooling() {
+  return Date.now() < davCooldownUntil ? davCooldownReason || 'auth' : '';
+}
+
+export function resetDavCooldown() {
+  davCooldownUntil = 0;
+  davCooldownReason = '';
+}
+
+/* 所有 WebDAV 请求的唯一入口，两条铁律：
+   1) credentials:'omit'
+      浏览器的 fetch 默认允许「HTTP 认证挑战」，跨源 401 + WWW-Authenticate 会弹出
+      原生账号密码框（用户名密码都是空的，看起来就是一个空白登录窗），而且同一轮里
+      有几个请求就弹几个。我们自己在 Authorization 头里带 Basic，完全不需要这一套。
+   2) redirect:'manual'
+      地址写错（漏了 /dav、指到网页版首页）时服务器会 302 到坚果云登录页。默认跟随
+      等于把标签页带去登录界面，用户看到的就是「一直弹登录页」。干脆不跟，把 3xx
+      当成「这个地址不是 WebDAV 端点」直接报出来。 */
+async function davFetch(url, ms, init = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, {
+      ...init,
+      credentials: 'omit',
+      redirect: 'manual',
+      cache: 'no-store',
+      signal: ctl.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isRedirect(res) {
+  if (!res) return false;
+  if (res.type === 'opaqueredirect') return true;
+  return res.status >= 300 && res.status < 400;
+}
+
+function netErr(err) {
+  return err?.name === 'AbortError' ? 'timeout' : 'network';
 }
 
 // 账号/密码可能是非 ASCII（中文密码），btoa 只认 Latin1，先过一遍 UTF-8
@@ -434,6 +497,10 @@ function davUrl(dconf) {
   return u.endsWith('/') ? u : `${u}/`;
 }
 
+function hasCred(dconf) {
+  return !!(dconf && String(dconf.username || '').trim() && String(dconf.password || ''));
+}
+
 function davHeaders(dconf, extra = {}) {
   return {
     Authorization: basicAuth(dconf.username, dconf.password),
@@ -441,49 +508,154 @@ function davHeaders(dconf, extra = {}) {
   };
 }
 
-async function davGet(dconf) {
+// 把一次响应翻译成「人话错误」：调用方只认这些 key
+function classify(res) {
+  if (isRedirect(res)) return { error: 'redirect', status: res.status };
+  if (res.status === 401) {
+    coolDown('auth');
+    return { error: 'auth', status: 401 };
+  }
+  if (res.status === 403) {
+    coolDown('forbidden');
+    return { error: 'forbidden', status: 403 };
+  }
+  return null;
+}
+
+async function davGet(dconf, opt = {}) {
   const base = davUrl(dconf);
   if (!base) return { error: 'badurl' };
+  if (!hasCred(dconf)) return { error: 'nocred' };
+  if (!opt.force) {
+    const cool = davCooling();
+    if (cool) return { error: cool, cooled: true };
+  }
   try {
-    const res = await fetchWithTimeout(base + WEBDAV_FILE, 15000, {
-      headers: davHeaders(dconf)
-    });
-    if (res.status === 404) return { snapshot: null }; // 还没推过：合法的空桶
-    if (res.status === 401 || res.status === 403) return { error: 'auth' };
-    if (!res.ok) return { error: `http ${res.status}` };
-    const json = await res.json();
+    const res = await davFetch(base + WEBDAV_FILE, 15000, { headers: davHeaders(dconf) });
+    const bad = classify(res);
+    // 404 有两种：文件还没推过（合法的空桶），或者目录压根不存在。
+    // 这里当空桶处理，写的时候 PUT 会拿到 409 再回来告诉我们目录有问题。
+    if (bad) return bad;
+    if (res.status === 404) return { snapshot: null };
+    if (!res.ok) return { error: `http ${res.status}`, status: res.status };
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const text = await res.text();
+    // 返回 HTML = 地址指到了网页而不是 WebDAV 目录
+    if (ct.includes('text/html') || /^\s*<(?:!doctype|html)/i.test(text)) return { error: 'html' };
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return { error: 'format' };
+    }
     if (!json || json.app !== 'firstlight' || typeof json.records !== 'object') {
       return { error: 'format' };
     }
     return { snapshot: json };
   } catch (err) {
-    return { error: err.message === 'timeout' ? 'timeout' : 'network' };
+    return { error: netErr(err) };
   }
 }
 
 async function davPut(dconf, body) {
   const base = davUrl(dconf);
   if (!base) return { error: 'badurl' };
+  if (!hasCred(dconf)) return { error: 'nocred' };
   const payload = JSON.stringify(body);
-  const putInit = { method: 'PUT', headers: davHeaders(dconf, { 'Content-Type': 'application/json' }), body: payload };
+  const putInit = {
+    method: 'PUT',
+    headers: davHeaders(dconf, { 'Content-Type': 'application/json' }),
+    body: payload
+  };
   try {
-    let res = await fetchWithTimeout(base + WEBDAV_FILE, 20000, putInit);
-    if (res.status === 409) {
-      // 目录不存在：建目录后重试一次（坚果云等要求先建好同步目录）
-      await fetchWithTimeout(base, 15000, { method: 'MKCOL', headers: davHeaders(dconf) });
-      res = await fetchWithTimeout(base + WEBDAV_FILE, 20000, putInit);
+    let res = await davFetch(base + WEBDAV_FILE, 20000, putInit);
+    if (res.status === 409 || res.status === 404) {
+      // 目录不存在：先建目录再重试一次（坚果云要求同步目录已存在）。
+      // MKCOL 到已存在的目录会回 405，那是好事，继续重试 PUT 就行。
+      await davFetch(base.replace(/\/+$/, ''), 15000, {
+        method: 'MKCOL',
+        headers: davHeaders(dconf)
+      }).catch(() => {});
+      res = await davFetch(base + WEBDAV_FILE, 20000, putInit);
     }
-    if (res.status === 401 || res.status === 403) return { error: 'auth' };
-    if (!res.ok) return { error: `http ${res.status}` };
+    const bad = classify(res);
+    if (bad) return bad;
+    if (!res.ok) return { error: `http ${res.status}`, status: res.status };
     return { ok: true };
   } catch (err) {
-    return { error: err.message === 'timeout' ? 'timeout' : 'network' };
+    return { error: netErr(err) };
   }
 }
 
-// 一轮完整同步：拉 → 合并 → 推。启动、保存防抖、手动按钮三个入口共用。
-async function webdavRound() {
+/* 写探针：真正上传一个几十字节的小文件再删掉。
+   「测试连接」只做 GET 是不够的 —— 只读账号、没有写权限的目录、免费空间写满，
+   全都表现为「测试成功、同步失败」，而失败点藏在 PUT 那一步。
+
+   两条实战经验（1.3.6 第一版就栽在第一条）：
+   1) 文件名不能用点开头。坚果云等网盘把 . 开头的当系统文件，PUT 直接 404，
+      「能写」被误判成「写不了」。
+   2) 探针被拒也不等于目录写不了。有些服务器对临时文件/某些扩展名有洁癖，
+      但快照文件照收。所以探针失败后拿真实快照路径再试一次：写回读到的原样
+      （没有快照就写一份空快照，跟首次同步完全一样），能写成就说明只是探针被嫌弃。 */
+async function davProbe(dconf) {
+  const base = davUrl(dconf);
+  if (!base) return { ok: false, error: 'badurl' };
+  if (!hasCred(dconf)) return { ok: false, error: 'nocred' };
+  const url = `${base}firstlight-probe-${Date.now().toString(36)}.txt`;
+  const init = {
+    method: 'PUT',
+    headers: davHeaders(dconf, { 'Content-Type': 'text/plain' }),
+    body: 'firstlight probe'
+  };
+  let status = 0;
+  try {
+    let res = await davFetch(url, 15000, init);
+    status = res.status;
+    if (res.status === 409 || res.status === 404) {
+      const mk = await davFetch(base.replace(/\/+$/, ''), 15000, {
+        method: 'MKCOL',
+        headers: davHeaders(dconf)
+      }).catch(() => null);
+      status = mk ? `${res.status}→MKCOL ${mk.status}` : `${res.status}`;
+      res = await davFetch(url, 15000, init);
+    }
+    const bad = classify(res);
+    // 不管成没成，探针文件都清掉，别在用户网盘里留垃圾
+    await davFetch(url, 8000, { method: 'DELETE', headers: davHeaders(dconf) }).catch(() => {});
+    if (!bad && res.ok) return { ok: true };
+    if (bad) return { ok: false, error: bad.error, status: bad.status, probeStatus: status };
+    const probeErr = `http ${res.status}`;
+    // 降级：直接测真实快照路径
+    const got = await davGet(dconf, { force: true });
+    const body = got.snapshot || { app: 'firstlight', ver: 1, savedAt: 0, deviceId: '', records: {} };
+    const put = await davPut(dconf, body);
+    if (put.ok) return { ok: true, viaSnapshot: true, probeBlocked: probeErr };
+    return { ok: false, error: put.error || probeErr, status: put.status, probeStatus: status };
+  } catch (err) {
+    return { ok: false, error: netErr(err), probeStatus: status };
+  }
+}
+
+/* 一轮完整同步：拉 → 合并 → 推。启动、保存防抖、手动按钮三个入口共用。
+   单飞：同一时刻只允许一轮在跑。不然「打开标签页 + 改了一条数据 + 手点了立即同步」
+   会叠出三轮往返，服务器那边就是同一秒钟三个 401 —— 弹窗一个接一个的根源。 */
+let davRoundPromise = null;
+
+function webdavRound() {
+  if (!davRoundPromise) {
+    davRoundPromise = davRoundInner().finally(() => {
+      davRoundPromise = null;
+    });
+  }
+  return davRoundPromise;
+}
+
+async function davRoundInner() {
   const dconf = conf.webdav;
+  if (!hasCred(dconf)) {
+    lastDavCheck = { ok: false, error: 'nocred', at: Date.now() };
+    return { ok: false, reason: 'nocred' };
+  }
   const got = await davGet(dconf);
   if (got.error) {
     lastDavCheck = { ok: false, error: got.error, at: Date.now() };
@@ -512,24 +684,158 @@ async function webdavRound() {
   return { ok: true, pulled };
 }
 
-// 设置页「测试连接」：只读不写
+/* 设置页「测试连接」：读一次 + 真写一个探针文件再删掉。
+   只测读会把「没写权限」误报成「连接成功」——用户随后点保存，就会在 PUT 那步失败。 */
 export async function testWebdav(dconf) {
-  const got = await davGet(dconf);
+  resetDavCooldown();
+  if (!davUrl(dconf)) return { ok: false, reason: 'badurl' };
+  if (!hasCred(dconf)) return { ok: false, reason: 'nocred' };
+  const got = await davGet(dconf, { force: true });
   if (got.error) return { ok: false, reason: got.error };
-  return { ok: true, hasSnapshot: !!got.snapshot, savedAt: got.snapshot?.savedAt || 0 };
+  const w = await davProbe(dconf);
+  if (!w.ok) {
+    return { ok: false, reason: w.error, canRead: true, canWrite: false, probeStatus: w.probeStatus };
+  }
+  return {
+    ok: true,
+    canRead: true,
+    canWrite: true,
+    hasSnapshot: !!got.snapshot,
+    savedAt: got.snapshot?.savedAt || 0,
+    probeBlocked: w.probeBlocked || ''
+  };
 }
 
+const HTTP_TEXT = {
+  400: '请求被服务器拒绝（地址里可能有空格、中文没转义或多余的字符）',
+  401: '账号或密码被拒（坚果云要用应用密码，不是登录密码）',
+  403: '账号能登录，但没有这个目录的写权限',
+  404: '找不到这个目录（地址要精确到网盘里已建好的文件夹，不能带不存在的子目录）',
+  405: '服务器不允许这个操作（地址可能指向了网页，而不是 WebDAV 目录）',
+  409: '目录不存在或层级不对（先在网盘里把同步目录建好）',
+  412: '服务器上的文件状态不对，稍后重试',
+  423: '文件被锁定（网盘里可能正在同步同一个文件）',
+  429: '请求太频繁，被网盘限流了，等几分钟再试',
+  500: '网盘服务器内部错误',
+  502: '网盘网关错误，稍后重试',
+  503: '网盘服务暂时不可用，稍后重试',
+  507: '网盘空间不足，写不进去'
+};
+
 export function davErrText(reason) {
-  return (
-    {
-      badurl: '地址不合法（要以 http(s):// 开头）',
-      auth: '账号或密码不对（坚果云要用应用密码，不是登录密码）',
-      network: '连不上服务器（检查地址、网络或防火墙）',
-      timeout: '连接超时',
-      format: '服务器上不是本插件的快照文件',
-      off: '同步未开启'
-    }[reason] || `未知错误（${reason}）`
+  const map = {
+    badurl: '地址不合法（要以 http(s):// 开头，且指向一个目录）',
+    nocred: '还没填账号密码（或填了没保存）',
+    auth: '账号或密码被拒（坚果云要用应用密码，不是登录密码；用户名填注册邮箱）',
+    forbidden: '账号能登录，但没有这个目录的写权限',
+    authcool: '上次认证失败，已暂停自动同步 10 分钟；改好账号密码后点「测试连接」',
+    redirect: '这个地址被重定向了（多半漏了 /dav，或指向了网页版首页）',
+    html: '这个地址返回的是网页，不是 WebDAV 目录（检查地址结尾）',
+    format: '服务器上的文件不是本插件的快照（可能是别的文件同名）',
+    network: '连不上服务器（检查地址、网络或防火墙）',
+    timeout: '连接超时',
+    off: '同步未开启'
+  };
+  if (map[reason]) return map[reason];
+  // 形如 "http 404"：按状态码翻译，别再给用户看「未知错误」
+  const m = /^http (\d{3})$/.exec(String(reason || ''));
+  if (m) {
+    const code = Number(m[1]);
+    return `服务器返回 ${code}：${HTTP_TEXT[code] || (code >= 500 ? '网盘服务端出错，稍后重试' : '请求没有被接受')}`;
+  }
+  return `未知错误（${reason}）`;
+}
+
+/* ---- 诊断：把一次同步拆成 5 步逐条报，用户抄回来就知道卡在哪 ---- */
+export async function diagnoseWebdav(dconf) {
+  resetDavCooldown();
+  const rows = [];
+  const add = (name, ok, detail) => rows.push({ name, ok, detail: detail || '' });
+  const show = (res) => {
+    if (res.type === 'opaqueredirect') return '3xx（被重定向，未跟随）';
+    const s = res.status;
+    const ct = (res.headers.get('content-type') || '').split(';')[0];
+    return `${s}${ct ? ` · ${ct}` : ''}`;
+  };
+
+  let u = null;
+  try {
+    u = new URL(String(dconf?.url || '').trim());
+  } catch {
+    add('① 地址解析', false, '不是合法 URL（要 http(s):// 开头）');
+    return rows;
+  }
+  const base = davUrl(dconf);
+  add(
+    '① 地址解析',
+    true,
+    `${u.origin}${u.pathname}${u.pathname.endsWith('/') ? '' : '（已自动补 /）'}`
   );
+  if (!hasCred(dconf)) {
+    add('② 账号密码', false, '为空，请先填好并点「保存并连接」');
+    return rows;
+  }
+  add('② 账号密码', true, `用户名 ${dconf.username}，密码 ${String(dconf.password).length} 位`);
+
+  try {
+    const res = await davFetch(base, 15000, {
+      method: 'PROPFIND',
+      headers: davHeaders(dconf, { Depth: '0', 'Content-Type': 'application/xml' }),
+      body: '<?xml version="1.0"?><propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>'
+    });
+    const s = res.status;
+    add(
+      '③ 目录探测 PROPFIND',
+      s === 207 || s === 200,
+      s === 207 || s === 200
+        ? `${show(res)}（目录存在）`
+        : `${show(res)}${
+            s === 401 ? '（认证被拒）'
+              : s === 403 ? '（没有这个目录的访问权限）'
+                : s === 404 ? '（这个目录不存在，地址要精确到已建好的文件夹）'
+                  : s === 405 ? '（服务器不允许 PROPFIND，通常不影响 PUT）'
+                    : ''
+          }`
+    );
+    if (s === 401) coolDown('auth');
+    else if (s === 403) coolDown('forbidden');
+  } catch (err) {
+    add('③ 目录探测 PROPFIND', false, netErr(err) === 'timeout' ? '超时' : '网络失败');
+    return rows;
+  }
+
+  const got = await davGet(dconf, { force: true });
+  add(
+    '④ 读快照 GET',
+    !got.error,
+    got.error
+      ? davErrText(got.error)
+      : got.snapshot
+        ? `200 · 已有快照，${Object.keys(got.snapshot.records || {}).length} 条记录`
+        : '404 · 还没有快照（首次同步正常）'
+  );
+
+  const w = await davProbe(dconf);
+  // 坚果云对「根目录直接建文件」时灵时不灵，一直 404 时给个可执行的下一步
+  let tip = '';
+  try {
+    const uu = new URL(base);
+    if (!w.ok && uu.pathname.replace(/\/+$/, '') === '/dav') {
+      tip = `；如果一直 404，可以在网盘里新建一个 firstlight 文件夹，地址改填 ${uu.origin}/dav/firstlight/`;
+    }
+  } catch {
+    /* 地址已经解析过，这里出错就忽略 */
+  }
+  add(
+    '⑤ 写探针 PUT+DELETE',
+    w.ok,
+    w.ok
+      ? w.probeBlocked
+        ? `可写（临时文件名被服务器拒了 ${w.probeBlocked}，改用快照路径写入成功，不影响同步）`
+        : '可写，探针文件已删除'
+      : `${davErrText(w.error)}${w.probeStatus ? `　探针过程：${w.probeStatus}` : ''}${tip}`
+  );
+  return rows;
 }
 
 /* ================= 状态诊断：把黑盒变白盒 ================= */
@@ -574,7 +880,8 @@ export async function getSyncStatus() {
     }
   }
   if (conf.mode === 'webdav') {
-    const got = await davGet(conf.webdav || {});
+    // 面板是用户主动点开看的，忽略冷却期，拿一次真实结果
+    const got = await davGet(conf.webdav || {}, { force: true });
     lastDavCheck = { ok: !got.error, error: got.error, at: Date.now() };
     return {
       ...base,
@@ -597,6 +904,7 @@ export async function syncNow() {
     return { ok: true, pulled };
   }
   if (conf.mode === 'webdav') {
+    resetDavCooldown(); // 手动点「立即同步」= 用户明确要求再试一次
     return webdavRound();
   }
   return { ok: false, reason: 'off' };
