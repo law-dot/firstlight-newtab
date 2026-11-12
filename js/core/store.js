@@ -27,6 +27,9 @@ const SYNC_CONF_KEY = 'monk.syncconf.v1'; // 同步配置只存本机，永不�
 export const GROUP_INDEX_KEY = 'monk.groupidx.v1';
 export const GROUP_PREFIX = 'monk.group.';
 const groupKey = (id) => `${GROUP_PREFIX}${id}.v1`;
+// 卡片墓碑：{ siteId: 删除时间 }。独立一条记录，不塞进分组 ——
+// 塞进去会被整组 LWW 覆盖冲掉，删掉的卡就复活了（1.3.8）。
+export const SITE_TOMBS_KEY = 'monk.sitetombs.v1';
 const idFromGroupKey = (k) => k.slice(GROUP_PREFIX.length).replace(/\.v1$/, '');
 const LEGACY_GROUPS_KEY = 'monk.groups.v1'; // 迁移前的旧记录，迁完即删
 const MIGRATE_BACKUP_KEY = 'monk.migrate.backup.v1'; // 迁移前的原始备份，方便人工回捞
@@ -355,17 +358,21 @@ let lastGroupIdxJSON = null;
 // 分组墓碑 { id: 删除时间 }。没有它，「A 机删掉的分组」在 B 机上会永远复活；
 // 有了它，合并索引时可以确定「这个 id 是真被删了」而不是「对面还没收到」。
 let groupTombs = {};
+// 卡片墓碑 { siteId: 删除时间 }。语义与分组墓碑相同，粒度到单张卡片。
+let siteTombs = {};
+let lastSiteTombsJSON = null;
 
 const TOMB_MAX = 60;              // 墓碑上限，超出丢最旧的（删 60 个分组的人都少见）
+const SITE_TOMB_MAX = 100;        // 卡片墓碑上限。100 条 ≈ 5KB，给浏览器同步 8KB 单条限额留余量
 const TOMB_TTL = 90 * 86400000;   // 90 天前的墓碑没有意义了
 
-function prunedTombs(tombs) {
+function prunedTombs(tombs, max = TOMB_MAX) {
   const now = Date.now();
   const list = Object.entries(tombs || {})
     .map(([id, ts]) => [id, Number(ts) || 0])
     .filter(([, ts]) => now - ts < TOMB_TTL)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, TOMB_MAX);
+    .slice(0, max);
   return Object.fromEntries(list);
 }
 
@@ -389,6 +396,11 @@ function cacheUnit(key, value) {
   if (key === GROUP_INDEX_KEY) {
     groupTombs = prunedTombs(value?.d || {});
     lastGroupIdxJSON = indexSignature((value?.v || []).map(String));
+    return;
+  }
+  if (key === SITE_TOMBS_KEY) {
+    siteTombs = prunedTombs(value?.v || {}, SITE_TOMB_MAX);
+    lastSiteTombsJSON = JSON.stringify(siteTombs);
     return;
   }
   if (key.startsWith(GROUP_PREFIX)) {
@@ -423,7 +435,7 @@ async function scanGroupIds() {
 
 // 读全部本地记录 { 'monk.settings.v1': {v,updatedAt}, 'monk.group.<id>.v1': {...}, ... }
 export async function loadUnits() {
-  const got = await kvGet([...SIMPLE_SECTIONS.map(sectionKey), GROUP_INDEX_KEY]);
+  const got = await kvGet([...SIMPLE_SECTIONS.map(sectionKey), GROUP_INDEX_KEY, SITE_TOMBS_KEY]);
   const units = {};
   for (const s of SIMPLE_SECTIONS) {
     const rec = got[sectionKey(s)];
@@ -445,6 +457,7 @@ export async function loadUnits() {
   }
   if (got[GROUP_INDEX_KEY]) units[GROUP_INDEX_KEY] = got[GROUP_INDEX_KEY];
   else if (ids.length) units[GROUP_INDEX_KEY] = { v: ids, updatedAt: 0 }; // 自愈：重建索引
+  if (got[SITE_TOMBS_KEY]) units[SITE_TOMBS_KEY] = got[SITE_TOMBS_KEY];
   return units;
 }
 
@@ -484,12 +497,20 @@ export async function removeUnits(keys) {
 function groupsFromUnits(units) {
   const idx = units[GROUP_INDEX_KEY];
   const ids = Array.isArray(idx?.v) ? idx.v.map(String) : [];
+  // 卡片墓碑在读取时过滤：被删的卡即使从云端拉回旧分组也不显示。
+  // 存储里的原始记录不动（同步合并需要原样），只在渲染视图这一层挡住。
+  const tombs = siteTombs && Object.keys(siteTombs).length ? siteTombs : null;
+  const strip = (g) => {
+    if (!tombs || !Array.isArray(g?.sites)) return g;
+    const sites = g.sites.filter((s) => s && s.id && !tombs[String(s.id)]);
+    return sites.length === g.sites.length ? g : { ...g, sites };
+  };
   const out = [];
   const seen = new Set();
   for (const id of ids) {
     const rec = units[groupKey(id)];
     if (rec?.v) {
-      out.push(rec.v);
+      out.push(strip(rec.v));
       seen.add(id);
     }
   }
@@ -497,7 +518,7 @@ function groupsFromUnits(units) {
   for (const [k, rec] of Object.entries(units)) {
     if (!k.startsWith(GROUP_PREFIX) || rec?.v == null) continue;
     const id = idFromGroupKey(k);
-    if (!seen.has(id)) out.push(rec.v);
+    if (!seen.has(id)) out.push(strip(rec.v));
   }
   return out;
 }
@@ -506,6 +527,8 @@ function groupsFromUnits(units) {
 export async function loadSections() {
   const units = await loadUnits();
   groupTombs = prunedTombs(units[GROUP_INDEX_KEY]?.d || {});
+  siteTombs = prunedTombs(units[SITE_TOMBS_KEY]?.v || {}, SITE_TOMB_MAX);
+  lastSiteTombsJSON = JSON.stringify(siteTombs);
   const out = {};
   for (const s of SIMPLE_SECTIONS) out[s] = units[sectionKey(s)] || null;
 
@@ -578,6 +601,8 @@ async function migrateGroups(legacyRec, data) {
 export async function loadData() {
   const units = await loadUnits();
   groupTombs = prunedTombs(units[GROUP_INDEX_KEY]?.d || {});
+  siteTombs = prunedTombs(units[SITE_TOMBS_KEY]?.v || {}, SITE_TOMB_MAX);
+  lastSiteTombsJSON = JSON.stringify(siteTombs);
   const legacy = await kvGet([LEGACY_GROUPS_KEY, LEGACY_KEY]);
   const legacyGroups = legacy[LEGACY_GROUPS_KEY];
   const legacyBlob = legacy[LEGACY_KEY];
@@ -642,6 +667,7 @@ export async function saveData(data, stamp = Date.now()) {
 
   // 分组：逐条比对，只有变了的那个分组才写
   const ids = [];
+  const prevGroupJSON = { ...lastGroupJSON }; // 旧内容快照，卡片墓碑靠它找出「被删的卡」
   for (const g of data.groups || []) {
     ids.push(g.id);
     const json = JSON.stringify(g);
@@ -656,6 +682,40 @@ export async function saveData(data, stamp = Date.now()) {
     delete lastGroupJSON[id];
     removes.push(groupKey(id));
     groupTombs[id] = stamp; // 立个墓碑：别的设备拉到新索引时才知道这是「删了」而不是「还没同步」
+  }
+
+  /* 卡片墓碑：id 消失了才算删，且要过两道排除 ——
+     ① 拖到别的分组：id 在新数据的任何分组里还在 → 是移动，不是删除；
+     ② 跟着分组一起没了：那条路走分组墓碑，不再重复立卡片墓碑。
+     墓碑只能由真实的删除动作产生，绝不能由「记录缺失」推导，
+     否则一台空设备就能给云端开出满屏墓碑，把所有数据「合法地」删掉。 */
+  const alive = new Set();
+  for (const g of data.groups || []) {
+    for (const s of g.sites || []) if (s && s.id) alive.add(String(s.id));
+  }
+  const gone = [];
+  for (const [gid, json] of Object.entries(prevGroupJSON)) {
+    if (!ids.includes(gid)) continue;
+    let old;
+    try {
+      old = JSON.parse(json);
+    } catch {
+      continue;
+    }
+    for (const s of old?.sites || []) {
+      const sid = s && s.id ? String(s.id) : '';
+      if (sid && !alive.has(sid) && !gone.includes(sid)) gone.push(sid);
+    }
+  }
+  if (gone.length) {
+    for (const sid of gone) siteTombs[sid] = Math.max(siteTombs[sid] || 0, stamp);
+    const tj = JSON.stringify(prunedTombs(siteTombs, SITE_TOMB_MAX));
+    if (tj !== lastSiteTombsJSON) {
+      lastSiteTombsJSON = tj;
+      siteTombs = JSON.parse(tj);
+      writes[SITE_TOMBS_KEY] = { v: siteTombs, updatedAt: stamp };
+      changed.push(SITE_TOMBS_KEY);
+    }
   }
   const idxJSON = indexSignature(ids);
   if (lastGroupIdxJSON !== idxJSON) {
@@ -672,7 +732,7 @@ export async function saveData(data, stamp = Date.now()) {
 /* ---------- 同步配置：只存本机，永不参与同步 ---------- */
 export async function loadSyncConf() {
   const raw = (await kvGet([SYNC_CONF_KEY]))[SYNC_CONF_KEY];
-  const conf = { mode: 'off', webdav: null, lastSyncAt: 0, ...(raw || {}) };
+  const conf = { mode: 'off', webdav: null, lastSyncAt: 0, mergedOnce: false, ...(raw || {}) };
   if (!['off', 'browser', 'webdav'].includes(conf.mode)) conf.mode = 'off';
   return conf;
 }

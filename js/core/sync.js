@@ -23,6 +23,7 @@
 import {
   GROUP_INDEX_KEY,
   GROUP_PREFIX,
+  SITE_TOMBS_KEY,
   loadUnits,
   saveUnit,
   removeUnit,
@@ -54,6 +55,26 @@ const isOurs = (key) =>
 
 const gidOf = (key) => key.slice(GROUP_PREFIX.length).replace(/\.v1$/, '');
 const gkey = (id) => `${GROUP_PREFIX}${id}.v1`;
+
+/* 卡片墓碑的合并：只做「并集 + 取最大时间戳」，永不整体覆盖。
+   墓碑是删除的凭证，必须单调累积 —— 谁都无权用自己那份把它覆盖掉，
+   否则「A 删的卡」会被 B 手里的旧墓碑表冲掉，卡片复活。
+   语义与分组索引的墓碑相同，只是 v 本身就是映射表。 */
+function sigOfTombs(rec) {
+  return JSON.stringify(rec?.v || {});
+}
+
+function mergeTombs(a, b) {
+  if (!a && !b) return null;
+  const v = {};
+  for (const src of [a, b]) {
+    for (const [id, ts] of Object.entries(src?.v || {})) {
+      v[id] = Math.max(v[id] || 0, Number(ts) || 0);
+    }
+  }
+  const stamp = Math.max(a?.updatedAt || 0, b?.updatedAt || 0);
+  return { v, updatedAt: stamp ? stamp + 1 : 0 };
+}
 
 let conf = { mode: 'off' };
 let remoteListener = null; // 远端有更新时回调（app.js 注册，负责重载数据与重渲染）
@@ -176,7 +197,7 @@ export async function pullMerge(remote) {
 
   const keys = new Set([...Object.keys(local), ...Object.keys(remote).filter(isOurs)]);
   for (const key of keys) {
-    if (!isOurs(key) || key === GROUP_INDEX_KEY) continue; // 索引单独处理
+    if (!isOurs(key) || key === GROUP_INDEX_KEY || key === SITE_TOMBS_KEY) continue; // 索引与卡片墓碑单独处理
     const r = remote[key];
     const l = local[key];
     const rt = r?.updatedAt || 0;
@@ -187,6 +208,19 @@ export async function pullMerge(remote) {
     } else if (l && l.v != null && lt > rt) {
       toPush[key] = l;
     }
+  }
+
+  /* 卡片墓碑：并集合并（见 mergeTombs 的注释）。放在分组合并之后，
+     这样刚拉回来的分组记录在下次 loadSections 时就会被墓碑过滤掉。 */
+  const ltombs = local[SITE_TOMBS_KEY] || null;
+  const rtombs = remote[SITE_TOMBS_KEY] || null;
+  if (ltombs || rtombs) {
+    const mergedT = mergeTombs(ltombs, rtombs);
+    if (sigOfTombs(ltombs) !== sigOfTombs(mergedT)) {
+      await saveUnit(SITE_TOMBS_KEY, mergedT);
+      pulled = true;
+    }
+    if (sigOfTombs(rtombs) !== sigOfTombs(mergedT)) toPush[SITE_TOMBS_KEY] = mergedT;
   }
 
   const li = local[GROUP_INDEX_KEY] || null;
@@ -209,6 +243,16 @@ export async function pullMerge(remote) {
 }
 
 /* ---------- 启动合并：逐条记录比较 updatedAt，新者胜出 ---------- */
+// 成功合并过一次之后置 true（存本机）。在那之前 prune 是危险的：
+// 本机索引可能残缺（首装没拉到、拉取失败），把「云端有、本地没有」当成「已删除」
+// 会把其他设备的分组记录从云端真的删掉 —— 唯一能造成不可逆清空的路径。
+async function markMerged() {
+  if (!conf.mergedOnce) {
+    conf.mergedOnce = true;
+    await saveSyncConf(conf);
+  }
+}
+
 async function initialMerge() {
   let pulled = false;
   try {
@@ -216,6 +260,7 @@ async function initialMerge() {
     const res = await pullMerge(remote);
     pulled = res.pulled;
     if (Object.keys(res.toPush).length) await pushRecords(res.toPush);
+    await markMerged();
   } catch (err) {
     console.warn('sync init failed', err);
     toast('同步初始化失败，请确认浏览器已登录账号');
@@ -263,8 +308,10 @@ async function pushPending() {
     return;
   }
   pushRetry = 0;
-  // 索引变了 = 分组有增删，顺手把云端已不存在分组的记录清掉
-  if (keys.includes(GROUP_INDEX_KEY)) {
+  // 索引变了 = 分组有增删，顺手清掉云端带墓碑的分组记录。
+  // 只清「墓碑里有的」——「索引里没有」不再构成删除依据：
+  // 本机索引残缺时（拉取失败、离线用过一阵），那半条判断会误删其他设备的分组。
+  if (keys.includes(GROUP_INDEX_KEY) && conf.mergedOnce) {
     await pruneRemoteGroups(units[GROUP_INDEX_KEY]);
   }
 }
@@ -296,14 +343,14 @@ async function pushRecords(writes) {
   }
 }
 
-// 云端多于索引的分组记录：删掉。让本机的「删除分组」能传到其他设备
+// 云端带墓碑的分组记录：删掉。让本机的「删除分组」能传到其他设备。
+// 只按墓碑删，不看「在不在本地索引里」——索引残缺时后者就是一颗地雷。
 async function pruneRemoteGroups(indexRec) {
   try {
-    const keep = new Set(((indexRec?.v) || []).map(String));
     const tombs = indexRec?.d || {};
     const remote = await chrome.storage.sync.get(null);
     const drop = Object.keys(remote).filter(
-      (k) => k.startsWith(GROUP_PREFIX) && (!keep.has(gidOf(k)) || tombs[gidOf(k)])
+      (k) => k.startsWith(GROUP_PREFIX) && tombs[gidOf(k)]
     );
     if (drop.length) await chrome.storage.sync.remove(drop);
   } catch (err) {
@@ -332,6 +379,7 @@ export async function overwriteLocalFromRemote() {
       conf.lastSyncAt = Date.now();
       await saveSyncConf(conf);
     }
+    await markMerged();
     return { ok: count > 0, count };
   } catch (err) {
     console.warn('sync overwrite failed', err);
@@ -422,6 +470,7 @@ async function applyRemote(touched, changes) {
    被本机的旧状态直接盖掉——本机先把它并进来，再上传合并结果。
    快照文件本身就是备份：用户随时可以下载一份当离线保命符。 */
 const WEBDAV_FILE = 'firstlight-sync.json';
+const WEBDAV_BAK = 'firstlight-sync.bak.json'; // 每次覆盖前留的上一份快照，误覆盖时能捞回来
 
 // 设置页状态面板最近一次检查的缓存（webdavRound / davGet 顺手填）
 export let lastDavCheck = null;
@@ -557,7 +606,7 @@ async function davGet(dconf, opt = {}) {
   }
 }
 
-async function davPut(dconf, body) {
+async function davPut(dconf, body, name = WEBDAV_FILE) {
   const base = davUrl(dconf);
   if (!base) return { error: 'badurl' };
   if (!hasCred(dconf)) return { error: 'nocred' };
@@ -568,7 +617,7 @@ async function davPut(dconf, body) {
     body: payload
   };
   try {
-    let res = await davFetch(base + WEBDAV_FILE, 20000, putInit);
+    let res = await davFetch(base + name, 20000, putInit);
     if (res.status === 409 || res.status === 404) {
       // 目录不存在：先建目录再重试一次（坚果云要求同步目录已存在）。
       // MKCOL 到已存在的目录会回 405，那是好事，继续重试 PUT 就行。
@@ -576,7 +625,7 @@ async function davPut(dconf, body) {
         method: 'MKCOL',
         headers: davHeaders(dconf)
       }).catch(() => {});
-      res = await davFetch(base + WEBDAV_FILE, 20000, putInit);
+      res = await davFetch(base + name, 20000, putInit);
     }
     const bad = classify(res);
     if (bad) return bad;
@@ -665,15 +714,42 @@ async function davRoundInner() {
   if (got.snapshot) {
     const res = await pullMerge(got.snapshot.records || {});
     pulled = res.pulled;
+    await markMerged();
   }
   const units = await loadUnits();
-  const put = await davPut(dconf, {
+  const payload = {
     app: 'firstlight',
     ver: 1,
     savedAt: Date.now(),
     deviceId: conf.deviceId || '',
     records: units
-  });
+  };
+  /* 保险丝：合并完整性校验。两层：
+     ① 云端快照里有记录、但一条都不被本版本识别（isOurs 全判否）——
+        典型成因是某次升级改了存储键前缀，旧快照瞬间变成「别人的数据」，
+        全量 PUT 会把它盖掉；
+     ② 有能识别的记录、但合并后本地缺了其中任何一条 —— 说明合并环节出了问题。
+     两种情况都宁可不写，让用户先查清楚。
+     （只查「本地一条都没有」不够：首装默认数据落盘后本地永远非空。） */
+  const allKeys = Object.keys(got.snapshot?.records || {});
+  const cloudKeys = allKeys.filter(isOurs);
+  // 分组记录缺席要有豁免：id 在本地分组墓碑里的，是刚被合法清掉的，不是合并失败
+  const idxTombs = units[GROUP_INDEX_KEY]?.d || {};
+  const missing = cloudKeys.filter(
+    (k) => !units[k] && !(k.startsWith(GROUP_PREFIX) && idxTombs[gidOf(k)])
+  );
+  const mergeBroken =
+    (allKeys.length > 0 && cloudKeys.length === 0) || missing.length > 0;
+  if (mergeBroken) {
+    lastDavCheck = { ok: false, error: 'mergebad', at: Date.now() };
+    return { ok: false, reason: 'mergebad' };
+  }
+  /* 保险丝：覆盖前把云端旧快照备份一份。万一将来某次改动让合并静默失效，
+     至少 .bak 里还有上一份完整数据。内容没变就不浪费这一次请求。 */
+  if (got.snapshot && JSON.stringify(got.snapshot) !== JSON.stringify(payload)) {
+    await davPut(dconf, got.snapshot, WEBDAV_BAK);
+  }
+  const put = await davPut(dconf, payload);
   if (put.error) {
     lastDavCheck = { ok: false, error: put.error, at: Date.now() };
     return { ok: false, reason: put.error };
@@ -733,8 +809,9 @@ export function davErrText(reason) {
     html: '这个地址返回的是网页，不是 WebDAV 目录（检查地址结尾）',
     format: '服务器上的文件不是本插件的快照（可能是别的文件同名）',
     network: '连不上服务器（检查地址、网络或防火墙）',
-    timeout: '连接超时',
-    off: '同步未开启'
+      timeout: '连接超时',
+      off: '同步未开启',
+      mergebad: '云端快照的记录没能完整合并进本地（可能是版本兼容问题），为防覆盖云端正本，这次没有写入。请把设置页的「诊断」结果发给开发者'
   };
   if (map[reason]) return map[reason];
   // 形如 "http 404"：按状态码翻译，别再给用户看「未知错误」

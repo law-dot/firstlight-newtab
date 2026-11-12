@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>1.3.8 自检：卡片墓碑 + 同步保险丝</title>
+<style>
+  body { font: 13px/1.7 -apple-system, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 16px; }
+  pre { background: #f6f6f4; border: 1px solid #ddd; border-radius: 8px; padding: 14px; white-space: pre-wrap; }
+  .ok { color: #1a7f37; } .bad { color: #c0392b; }
+</style>
+</head>
+<body>
+<h1>1.3.8 自检：卡片墓碑 + 同步保险丝</h1>
+<p>模拟两台设备（localStorage 即存储层），配合本机 8766 端口的故障模拟 WebDAV。</p>
+<pre id="out">running…</pre>
+<script type="module">
+const out = [];
+const ok = (name, cond, extra = '') =>
+  out.push(`${cond ? '✓' : '✗'} ${name}${extra ? `　— ${extra}` : ''}`);
+const done = () => {
+  const pass = out.filter((l) => l.startsWith('✓')).length;
+  document.getElementById('out').textContent =
+    `${out.join('\n')}\n\n通过 ${pass} / ${out.length}`;
+};
+
+try {
+  const {
+    loadData, saveData, loadSections, loadUnits,
+    GROUP_INDEX_KEY, SITE_TOMBS_KEY
+  } = await import('../js/core/store.js');
+  const { pullMerge, syncNow, reloadSyncConf } = await import('../js/core/sync.js');
+
+  const BASE = 'http://127.0.0.1:8766';
+  const now = Date.now();
+  const T1 = now - 9000, T2 = now - 6000, T3 = now - 3000;
+  const GKEY = (id) => `monk.group.${id}.v1`;
+  const S = (id) => ({ id, title: id.toUpperCase(), url: `https://${id}.example`, icon: '', desc: '', autoDesc: '' });
+
+  const clearMonk = () => {
+    for (const k of [...Object.keys(localStorage)]) {
+      if (k.startsWith('monk.')) localStorage.removeItem(k);
+    }
+  };
+  const setLS = (k, rec) => localStorage.setItem(k, JSON.stringify(rec));
+  const getLS = (k) => JSON.parse(localStorage.getItem(k) || 'null');
+  const freshDevice = async () => { clearMonk(); return loadData(); };
+  const tombMap = () => getLS(SITE_TOMBS_KEY)?.v || {};
+  const siteIds = (groups, gid) =>
+    (groups.find((g) => g.id === gid)?.sites || []).map((s) => s.id);
+
+  /* ---------- A. 首装保护（回归）：空本地不能覆盖云端 ---------- */
+  await freshDevice();
+  const cloudA0 = {
+    'monk.settings.v1': { v: { engine: 'bing' }, updatedAt: 5000 },
+    [GROUP_INDEX_KEY]: { v: ['gx'], d: {}, updatedAt: 5000 },
+    [GKEY('gx')]: { v: { id: 'gx', name: '云上分组', sites: [S('c1')] }, updatedAt: 5000 }
+  };
+  const pulledA = await pullMerge(cloudA0);
+  const secsA = await loadSections();
+  ok('[A1] 首装拉取：云端的组和设置并进本地', pulledA.pulled === true && secsA.groups.v.some((g) => g.id === 'gx'),
+     `ids=[${(secsA.groups?.v || []).map((g) => g.id)}]`);
+  ok('[A2] 首装不会反推空数据（本地戳 0 全输）', secsA.settings.v.engine === 'bing');
+
+  /* ---------- B. 卡片墓碑：A 删卡 + B 改同组，两边都对 ---------- */
+  let data = await freshDevice();
+  data.groups = [{ id: 'g1', name: 'G1', sites: [S('s1'), S('s2'), S('s3')] }];
+  await saveData(data, T1);
+  data.groups[0].sites = data.groups[0].sites.filter((s) => s.id !== 's2'); // A 删掉 s2
+  await saveData(data, T2);
+  ok('[B1] 删卡后立了卡片墓碑', !!tombMap().s2, JSON.stringify(tombMap()));
+  const cloudA = await loadUnits(); // A 机的云端快照
+
+  // 模拟 B 机：离线期间没收到删除，还往同组加了 s4
+  clearMonk();
+  setLS(GKEY('g1'), { v: { id: 'g1', name: 'G1', sites: [S('s1'), S('s2'), S('s3'), S('s4')] }, updatedAt: T3 });
+  setLS(GROUP_INDEX_KEY, { v: ['g1'], d: {}, updatedAt: T3 });
+  setLS('monk.settings.v1', { v: {}, updatedAt: T3 });
+  await loadData();
+  const resB = await pullMerge(cloudA);
+  const secsB = await loadSections();
+  const idsB = siteIds(secsB.groups.v, 'g1');
+  ok('[B3] 整组 LWW 上 B 赢，但墓碑仍把 s2 过滤掉', !idsB.includes('s2'), idsB.join(','));
+  ok('[B4] B 新加的 s4 没丢，且墓碑已并入 B', idsB.includes('s4') && !!tombMap().s2, idsB.join(','));
+
+  // B 的胜出版本（含 s4、不含 s2 的视图）推回云端，A 再拉
+  const cloudB = { ...cloudA, ...resB.toPush };
+  clearMonk();
+  setLS(GKEY('g1'), { v: { id: 'g1', name: 'G1', sites: [S('s1'), S('s3')] }, updatedAt: T2 });
+  setLS(GROUP_INDEX_KEY, { v: ['g1'], d: {}, updatedAt: T2 });
+  setLS(SITE_TOMBS_KEY, { v: { s2: T2 }, updatedAt: T2 });
+  setLS('monk.settings.v1', { v: {}, updatedAt: T2 });
+  await loadData();
+  await pullMerge(cloudB);
+  const secsC = await loadSections();
+  const idsC = siteIds(secsC.groups.v, 'g1');
+  ok('[B5] A 最终拿到 s4，s2 不复活', idsC.includes('s4') && !idsC.includes('s2'), idsC.join(','));
+  ok('[B6] 存储层保留原始记录、只在读取视图过滤',
+     (getLS(GKEY('g1'))?.v?.sites || []).length === 4, 'raw=4, view=' + idsC.length);
+
+  /* ---------- C. 拖动卡片到别的分组：是移动，不是删除 ---------- */
+  data = await freshDevice();
+  data.groups = [{ id: 'g1', name: 'G1', sites: [S('s1'), S('s2')] }];
+  await saveData(data, T1);
+  data.groups = [
+    { id: 'g1', name: 'G1', sites: [S('s1')] },
+    { id: 'g2', name: 'G2', sites: [S('s2')] }
+  ];
+  await saveData(data, T2);
+  const secsD = await loadSections();
+  ok('[C1] 移卡不立墓碑', !tombMap().s2, JSON.stringify(tombMap()));
+  ok('[C2] 移过去的卡在新分组里正常显示', siteIds(secsD.groups.v, 'g2').includes('s2'));
+
+  /* ---------- D. 删整个分组：只走分组墓碑 ---------- */
+  data = await freshDevice();
+  data.groups = [{ id: 'g1', name: 'G1', sites: [S('s1'), S('s2')] }];
+  await saveData(data, T1);
+  data.groups = [];
+  await saveData(data, T2);
+  const idxD = getLS(GROUP_INDEX_KEY);
+  ok('[D1] 删整组不产生卡片墓碑', !tombMap().s1 && !tombMap().s2);
+  ok('[D2] 分组墓碑在索引里', !!idxD?.d?.g1);
+
+  /* ---------- E. WebDAV 保险丝 ---------- */
+  await import('../js/core/store.js').then((m) => m.saveSyncConf({
+    mode: 'webdav',
+    webdav: { url: `${BASE}/ok/`, username: 'u@x.com', password: 'p' },
+    lastSyncAt: 0,
+    mergedOnce: false
+  }));
+  await reloadSyncConf();
+  await fetch(`${BASE}/__reset`);
+  await fetch(`${BASE}/ok/firstlight-sync.json`, { method: 'DELETE' });
+  await fetch(`${BASE}/ok/firstlight-sync.bak.json`, { method: 'DELETE' });
+
+  // E1: 云端记录一条都识别不了（模拟键名变更）→ 拒写
+  await fetch(`${BASE}/ok/firstlight-sync.json`, {
+    method: 'PUT',
+    body: JSON.stringify({ app: 'firstlight', ver: 1, records: { 'junk.k.v1': { v: 1, updatedAt: 5 } } })
+  });
+  const r1 = await syncNow();
+  ok('[E1] 云端全是陌生键 → 拒写（mergebad）', r1.ok === false && r1.reason === 'mergebad', r1.reason || r1.ok);
+  const back1 = await (await fetch(`${BASE}/ok/firstlight-sync.json`)).json();
+  ok('[E2] 拒写时云端主文件原样保留', back1.records['junk.k.v1']?.v === 1);
+
+  // E3: 合法快照 → 正常往返，且覆盖前有备份
+  await freshDevice(); // 本机全新（戳 0），云端应完整并进来
+  const S1 = {
+    app: 'firstlight', ver: 1, savedAt: Date.now(), deviceId: 'cloud',
+    records: {
+      [GROUP_INDEX_KEY]: { v: ['g9'], d: {}, updatedAt: 900 },
+      [GKEY('g9')]: { v: { id: 'g9', name: '云上组', sites: [S('c9')] }, updatedAt: 900 },
+      'monk.settings.v1': { v: { engine: 'bing' }, updatedAt: 900 }
+    }
+  };
+  await fetch(`${BASE}/ok/firstlight-sync.json`, { method: 'PUT', body: JSON.stringify(S1) });
+  const r3 = await syncNow();
+  ok('[E3] 合法快照正常往返', r3.ok === true, r3.reason || '');
+  const bak = await (await fetch(`${BASE}/ok/firstlight-sync.bak.json`)).json();
+  ok('[E4] 覆盖前旧快照备份成 .bak.json', !!bak?.records?.[GKEY('g9')]);
+  const secsE = await loadSections();
+  ok('[E5] 云端数据合并进本地', secsE.groups.v.some((g) => g.id === 'g9') && secsE.settings.v.engine === 'bing');
+} catch (err) {
+  out.push(`✗ 页面异常：${err && err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : err}`);
+}
+done();
+</script>
+</body>
+</html>
