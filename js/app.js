@@ -53,22 +53,37 @@ async function init() {
   /* 其他设备推送更新时：重载数据并刷新界面。
      1.4.1：加一道内容比对 —— 同步引擎的回声、我们自己刚写上去的推送，
      都会走到这里。数据一模一样却重画一遍整页（连壁纸一起重设），
-     多窗口/多设备下就是肉眼可见的闪屏。内容没变直接跳过。 */
-  let dataSig = JSON.stringify(state.data);
+     多窗口/多设备下就是肉眼可见的闪屏。内容没变直接跳过。
+     1.4.2：比对时把 wallpaper.online.fetchedAt 抹平 —— 它只是「这次抓图
+     的时刻」，纯缓存时间戳，不影响任何显示；旧版标签页每渲染一次就把它
+     写新一次，不抹平的话每次都判成「内容变了」，renderAll 一轮一轮空转
+     （favicon 重建、设置下拉回填，看起来就是图标和选项在闪）。 */
+  let dataSig = normSig(state.data);
   onSyncRemote(async () => {
     const next = await loadData();
-    const sig = JSON.stringify(next);
+    const sig = normSig(next);
     if (sig === dataSig) return; // 内容一模一样：连 state.data 都不换
-    /* 壁纸刚在本页换过（10 秒保护窗）：这一轮重载可能是别的窗口/设备带着**旧设置**
-       推上来的（它们的内存态还是上一张），整份换掉就会「换完闪一下又变回去」。
-       其他内容照收，壁纸保留本页这次的；下一次本页写盘会把设置重新顶正。 */
+    /* 壁纸按 wallpaperAt 比新旧（与同步合并同一条规则）：别的窗口/设备
+       带着**旧壁纸**写上来时，不整份换掉 —— 否则「换完闪一下又变回去」。
+       旧版标签页不认 wallpaperAt，但只要本页这份更新，我们就顶回去，
+       旧版下一轮重载就会拿到正确的壁纸，两边收敛。 */
+    const lw = state.data.settings?.wallpaper;
+    const nw = next.settings?.wallpaper;
+    let keepMine = false;
+    if (lw && nw && (Number(nw.wallpaperAt) || 0) < (Number(lw.wallpaperAt) || 0)) {
+      next.settings.wallpaper = lw;
+      keepMine = true;
+    }
     if (isRecentLocalWrite('monk.settings.v1')) {
       next.settings.wallpaper = state.data.settings.wallpaper;
+      keepMine = true;
+    }
+    if (keepMine) {
       // 存储里那份已经被别人写成旧值了，把本页这份顶回去（带新时间戳）
       persist();
     }
     state.data = next;
-    dataSig = JSON.stringify(next);
+    dataSig = normSig(next);
     renderAll();
     applyTheme();
     await applyWallpaper();
@@ -410,7 +425,26 @@ function greetOf(h) {
 }
 
 /* ================= 渲染 ================= */
+/* 比对签名：抹掉纯缓存时间戳（不影响显示的字段），避免「没变的东西」
+   被当成变化触发整页重绘。目前只有 wallpaper.online.fetchedAt。 */
+function normSig(data) {
+  try {
+    const c = JSON.parse(JSON.stringify(data));
+    if (c.settings?.wallpaper?.online) c.settings.wallpaper.online.fetchedAt = 0;
+    return JSON.stringify(c);
+  } catch {
+    return JSON.stringify(data);
+  }
+}
+
+/* renderAll 幂等守卫：数据和视图状态没变就整个跳过。
+   每次重画都是清空重建（卡片、favicon <img>、设置下拉全部重新来），
+   重复调用就是肉眼可见的闪 —— 1.4.2 报的「图标闪 / 选项闪」正源于此。 */
+let renderSig = '';
 export function renderAll() {
+  const sig = JSON.stringify([state.data, state.activeGroupId, state.editMode]);
+  if (sig === renderSig) return;
+  renderSig = sig;
   if (!state.data.groups.some((g) => g.id === state.activeGroupId)) {
     state.activeGroupId = state.data.groups[0]?.id ?? null;
   }
