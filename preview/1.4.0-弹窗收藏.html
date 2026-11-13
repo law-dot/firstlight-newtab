@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>1.4.0 弹窗收藏 · 自检</title>
+<style>
+  body { font: 13px/1.7 -apple-system, sans-serif; margin: 24px; max-width: 780px; }
+  h1 { font-size: 16px; }
+  pre { background: #f6f6f4; border: 1px solid #ddd; padding: 14px; border-radius: 8px; white-space: pre-wrap; }
+  .pass { color: #1d7a46; } .fail { color: #b03030; font-weight: 500; }
+</style>
+</head>
+<body>
+<h1>1.4.0 弹窗收藏 · 自检</h1>
+<p>弹窗本身依赖扩展 API（tabs/scripting）无法在这里跑，本页验证的是它的数据层：
+队列的追加与排空、planAdds 的查重/兜底规则、drain 的落组、以及弹窗偏好。</p>
+<pre id="out">运行中…</pre>
+<script type="module">
+const out = [];
+const ok = (name, cond, extra = '') => out.push([!!cond, name, extra]);
+
+try {
+  const {
+    appendPendingAdd, takePendingAdds, loadPopupConf, savePopupConf,
+    loadUnits, PENDING_ADDS_KEY
+  } = await import('../js/core/store.js');
+  const { planAdds, drainPendingAdds, normUrl, hostOf } =
+    await import('../js/core/pending.js');
+
+  /* ---------- ① 队列：追加 → 取走 → 排空 ---------- */
+  await appendPendingAdd({ url: 'https://a.example', title: 'A', desc: '', groupId: 'g1' });
+  await appendPendingAdd({ url: 'https://b.example', title: 'B', desc: '', groupId: 'g2' });
+  await appendPendingAdd({ url: 'https://c.example', title: 'C', desc: '', groupId: 'g1' });
+  let q = await takePendingAdds();
+  ok('[1] 三条入队、三条取走，顺序保持', q.length === 3 && q[0].url === 'https://a.example' && q[2].url === 'https://c.example',
+     JSON.stringify(q.map((x) => x.url)));
+  q = await takePendingAdds();
+  ok('[2] 取走即排空，再取为空', q.length === 0);
+
+  /* ---------- ② 队列上限 20：丢最旧的 ---------- */
+  for (let i = 0; i < 25; i += 1) {
+    await appendPendingAdd({ url: `https://x${i}.example`, title: `X${i}`, groupId: 'g1' });
+  }
+  q = await takePendingAdds();
+  ok('[3] 超 20 条只留最新的 20 条', q.length === 20 && q[0].url === 'https://x5.example' && q[19].url === 'https://x24.example',
+     `len=${q.length} first=${q[0]?.url}`);
+
+  /* ---------- ③ 引擎键扫描不应看到瞬态队列 ---------- */
+  const units = await loadUnits();
+  ok('[4] loadUnits 的引擎键里没有 pendingadds', !(PENDING_ADDS_KEY in units),
+     Object.keys(units).join(','));
+
+  /* ---------- ④ planAdds：查重与兜底 ---------- */
+  const groups = [
+    { id: 'g1', name: '常用', sites: [{ id: 's1', url: 'https://dup.example/path' }] },
+    { id: 'g2', name: '工作', sites: [] }
+  ];
+  const r1 = planAdds(
+    [
+      { url: 'https://dup.example/path', groupId: 'g1' },                    // 与已有重复
+      { url: 'https://dup.example/path/', groupId: 'g2' },                   // 末尾斜杠也算重复
+      { url: 'https://dup.example/path#frag', groupId: 'g1' },               // 锚点也算重复
+      { url: 'chrome://settings', groupId: 'g1' },                           // 非法协议
+      { url: 'https://new.example', groupId: 'gX-gone' },                    // 分组已删 → 落第一组
+      { url: 'https://new2.example', groupId: 'g2' },                        // 正常
+      { url: 'https://new2.example', groupId: 'g2' },                        // 批内重复
+      { url: 'https://notitle.example', groupId: 'g2', title: '', desc: 'x'.repeat(200) } // 标题/简介兜底
+    ],
+    groups
+  );
+  ok('[5] 重复网址共 4 条（已有3种写法 + 批内重复）全部跳过',
+     r1.skipped.filter((s) => s.why === 'dup').length === 4,
+     JSON.stringify(r1.skipped));
+  ok('[6] chrome:// 非法协议被拒', r1.skipped.some((s) => s.why === 'badurl' && s.item.url.startsWith('chrome://')));
+  ok('[7] 指定分组不存在时落到第一个分组', r1.adds.some((a) => a.groupId === 'g1' && a.site.url === 'https://new.example'));
+  ok('[8] 只收 3 条，批内重复也拦住', r1.adds.length === 3, JSON.stringify(r1.adds.map((a) => a.site.url)));
+  const notitle = r1.adds.find((a) => a.site.url === 'https://notitle.example')?.site;
+  ok('[9] 空标题用域名兜底、超长简介截到 120',
+     notitle && notitle.title === 'notitle.example' && notitle.desc.length === 120,
+     `title=${notitle?.title} descLen=${notitle?.desc?.length}`);
+
+  /* ---------- ⑤ drain：真的挂进分组，且二次排空是空跑 ---------- */
+  const fakeState = { data: { groups: JSON.parse(JSON.stringify(groups)) } };
+  await appendPendingAdd({ url: 'https://drained.example', title: '排空我', desc: 'ok', groupId: 'g2' });
+  await appendPendingAdd({ url: 'https://drained2.example', title: '也排空我', groupId: 'g1' });
+  const n1 = await drainPendingAdds(fakeState);
+  ok('[10] drain 返回加入条数 2', n1 === 2, `n=${n1}`);
+  ok('[11] 站点真的挂进了对应分组',
+     fakeState.data.groups[1].sites.some((s) => s.url === 'https://drained.example') &&
+     fakeState.data.groups[0].sites.some((s) => s.url === 'https://drained2.example'));
+  const n2 = await drainPendingAdds(fakeState);
+  ok('[12] 队列已空，二次 drain 返回 0（幂等）', n2 === 0);
+
+  /* ---------- ⑥ 弹窗偏好：记住上次分组 ---------- */
+  await savePopupConf({ lastGroupId: 'g2' });
+  const conf = await loadPopupConf();
+  ok('[13] popupconf 写读一致', conf.lastGroupId === 'g2', JSON.stringify(conf));
+
+  /* ---------- ⑦ 工具函数 ---------- */
+  ok('[14] normUrl 三种写法归一', normUrl('https://x.example/a/#top') === normUrl('https://x.example/a'));
+  ok('[15] hostOf 去 www', hostOf('https://www.zhihu.com/question/1') === 'zhihu.com');
+
+  /* ---------- 汇总 ---------- */
+  const total = out.length;
+  const good = out.filter(([p]) => p).length;
+  const lines = out.map(([p, name, extra]) =>
+    `${p ? '✓' : '✗'} ${name}${p ? '' : `  ← ${extra}`}`);
+  document.getElementById('out').innerHTML =
+    `${good}/${total} 通过\n\n${lines.join('\n')}`;
+  document.title = `${good}/${total} 弹窗收藏自检`;
+} catch (err) {
+  document.getElementById('out').textContent = `自检中断：${err.message}\n${err.stack}`;
+}
+</script>
+</body>
+</html>

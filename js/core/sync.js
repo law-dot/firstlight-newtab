@@ -67,7 +67,9 @@ const PULL_DEBOUNCE = 1000;
 //   feedcache / calfeeds = 抓取结果，同步过去只是白占 8KB 配额，还会让旧内容盖掉新内容。
 const LOCAL_ONLY = new Set([
   'monk.syncconf.v1', 'monk.feedcache.v1', 'monk.calfeeds.v1',
-  'monk.migrate.backup.v1', 'monk.data.v1', 'monk.groups.v1'
+  'monk.migrate.backup.v1', 'monk.data.v1', 'monk.groups.v1',
+  // 弹窗收藏的瞬态队列与本机偏好：本机产生、本机消费，同步过去毫无意义
+  'monk.pendingadds.v1', 'monk.popupconf.v1'
 ]);
 const isOurs = (key) =>
   typeof key === 'string' && key.startsWith('monk.') && !LOCAL_ONLY.has(key);

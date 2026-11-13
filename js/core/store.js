@@ -772,6 +772,54 @@ export async function saveData(data, stamp = Date.now()) {
   return changed; // 变更的存储键，同步引擎据此决定推送范围
 }
 
+/* ---------- 弹窗收藏：待办队列（1.4.0） ----------
+   点插件图标弹出的 popup 和 newtab 是两个运行环境，不能让 popup 直接改分组数据
+   （会和 newtab 的内存态并发打架）。popup 只把「想收藏什么」追加进队列，
+   newtab 侧（pending.js）排空队列、走正规的 persist + 同步链路。
+   newtab 没开着也不丢：下次打开新标签页时排空。
+   队列是机器本地的瞬态数据，永不参与同步（见 sync.js 的 LOCAL_ONLY）。 */
+export const PENDING_ADDS_KEY = 'monk.pendingadds.v1';
+const PENDING_MAX = 20; // 攒太多也没意义，上限一过丢最旧的
+
+export async function appendPendingAdd(item) {
+  const raw = (await kvGet([PENDING_ADDS_KEY]))[PENDING_ADDS_KEY];
+  const items = Array.isArray(raw?.v) ? raw.v.slice(-(PENDING_MAX - 1)) : [];
+  items.push({ ...item, ts: Date.now() });
+  await kvSet({ [PENDING_ADDS_KEY]: { v: items, updatedAt: Date.now() } });
+  return items.length;
+}
+
+// 取走并立刻清掉队列（读和删是一个动作，排空失败最多丢这一次的收藏）
+export async function takePendingAdds() {
+  const raw = (await kvGet([PENDING_ADDS_KEY]))[PENDING_ADDS_KEY];
+  await kvRemove([PENDING_ADDS_KEY]);
+  return Array.isArray(raw?.v) ? raw.v : [];
+}
+
+/* 弹窗记住「上次选的分组」，下次打开默认选中它。
+   只存本机，不参与同步——各机器的分组布局本来就允许不一样。 */
+const POPUP_CONF_KEY = 'monk.popupconf.v1';
+
+export async function loadPopupConf() {
+  const raw = (await kvGet([POPUP_CONF_KEY]))[POPUP_CONF_KEY];
+  return { lastGroupId: String(raw?.lastGroupId || ''), ...(raw || {}) };
+}
+
+export async function savePopupConf(conf) {
+  await kvSet({ [POPUP_CONF_KEY]: conf });
+}
+
+/* 弹窗用的轻量分组列表：只要 id/名字/已有网址（查重用）。
+   不走 loadSections——那会动引擎的墓碑缓存，popup 不该碰它们。 */
+export async function loadGroupList() {
+  const units = await loadUnits();
+  return groupsFromUnits(units).map((g) => ({
+    id: g.id,
+    name: g.name,
+    sites: (g.sites || []).map((s) => ({ id: s.id, url: s.url }))
+  }));
+}
+
 /* ---------- 同步配置：只存本机，永不参与同步 ---------- */
 export async function loadSyncConf() {
   const raw = (await kvGet([SYNC_CONF_KEY]))[SYNC_CONF_KEY];

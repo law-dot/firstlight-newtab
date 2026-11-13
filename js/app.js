@@ -7,6 +7,7 @@ export const VERSION =
 import { loadData } from './core/store.js';
 import { state, persist } from './core/state.js';
 import { initSync, onSyncRemote, backgroundPull } from './core/sync.js';
+import { drainPendingAdds, watchPendingAdds } from './core/pending.js';
 import { $, $$, toast } from './core/utils.js';
 
 import { renderEngines, bindSearch, hideSuggest } from './features/search.js';
@@ -56,6 +57,10 @@ async function init() {
     applyTheme();
     await applyWallpaper();
   });
+  // 弹窗收藏的落地：newtab 开着时实时排空；没开着就等下次启动（上面启动路径兜底）
+  watchPendingAdds(drainFromPopup);
+  await drainFromPopup(true); // 启动排空：上次关着窗口时用弹窗存的东西不会丢
+
   applyTheme();
   applySideState();
   buildSwatches();
@@ -98,6 +103,21 @@ async function init() {
   });
 
   fxSync();
+}
+
+/* 弹窗收藏：取走队列 → 挂进分组 → persist（顺路走同步推送）→ 重渲染。
+   startup=true 时不 toast——刚开新标签页就弹「已加入」是打扰。
+   排到 0 条（含删除广播的空跑）时静默返回。 */
+async function drainFromPopup(startup = false) {
+  try {
+    const n = await drainPendingAdds(state);
+    if (!n) return;
+    await persist();
+    renderAll();
+    if (!startup) toast(`弹窗收藏：已加入 ${n} 个网站`);
+  } catch (err) {
+    console.warn('drain pending adds failed', err);
+  }
 }
 
 /* 一次性挂上所有模块的事件监听 */

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>初见 · 收藏当前网页</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    width: 340px; margin: 0; padding: 14px;
+    font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: canvas; color: canvastext;
+  }
+  .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .favicon { width: 20px; height: 20px; border-radius: 5px; flex: none; background: #eee; }
+  .host { font-size: 12px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  label { display: block; font-size: 12px; opacity: 0.65; margin: 10px 0 4px; }
+  input[type="text"], textarea, select {
+    width: 100%; box-sizing: border-box; padding: 7px 9px;
+    border: 1px solid color-mix(in srgb, canvastext 22%, transparent);
+    border-radius: 8px; font: inherit; background: canvas; color: canvastext;
+  }
+  textarea { height: 56px; resize: vertical; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid #7c6cf6; outline-offset: -1px; border-color: #7c6cf6; }
+  #btnSave {
+    width: 100%; margin-top: 14px; padding: 9px 0;
+    border: none; border-radius: 9px; font: inherit; font-weight: 500;
+    background: #7c6cf6; color: #fff; cursor: pointer;
+  }
+  #btnSave:disabled { opacity: 0.45; cursor: default; }
+  #btnSave:not(:disabled):active { transform: scale(0.98); }
+  #status { font-size: 12px; margin-top: 9px; min-height: 18px; opacity: 0.7; text-align: center; }
+  #status.err { opacity: 1; color: #c0392b; }
+  #status.ok { opacity: 1; color: #1d9e75; }
+  .blocked { text-align: center; padding: 26px 6px; opacity: 0.75; }
+  .blocked b { display: block; font-size: 14px; margin-bottom: 6px; font-weight: 500; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <div id="form">
+    <div class="head">
+      <img class="favicon" id="fav" alt="" hidden>
+      <div class="host" id="host"></div>
+    </div>
+    <label for="title">标题</label>
+    <input type="text" id="title" maxlength="60">
+    <label for="desc">简介（可留空，之后会在卡片上自动补）</label>
+    <textarea id="desc" maxlength="120"></textarea>
+    <label for="group">收藏到分组</label>
+    <select id="group"></select>
+    <button id="btnSave">完成收藏</button>
+    <div id="status"></div>
+  </div>
+  <div id="blocked" class="blocked" hidden>
+    <b>这个页面没法收藏</b>
+    <span id="blockedWhy">浏览器内部页面不在收藏范围内，打开普通网站后再试。</span>
+  </div>
+  <script type="module" src="js/popup.js"></script>
+</body>
+</html>
