@@ -7,7 +7,7 @@ export const VERSION =
 import { loadData, isRecentLocalWrite } from './core/store.js';
 import { state, persist } from './core/state.js';
 import { initSync, onSyncRemote, backgroundPull } from './core/sync.js';
-import { drainPendingAdds, watchPendingAdds } from './core/pending.js';
+import { drainPendingAdds, drainPendingReads, watchPendingAdds } from './core/pending.js';
 import { $, $$, toast } from './core/utils.js';
 
 import { renderEngines, bindSearch, hideSuggest } from './features/search.js';
@@ -35,6 +35,7 @@ import {
   bindAbout, checkUpdateOnStart
 } from './features/settings.js';
 import { startTour, shouldTour } from './features/onboarding.js';
+import { renderReading, bindReading } from './features/reading.js';
 
 /* ================= 启动 ================= */
 init().catch((err) => {
@@ -141,11 +142,15 @@ async function init() {
    排到 0 条（含删除广播的空跑）时静默返回。 */
 async function drainFromPopup(startup = false) {
   try {
-    const n = await drainPendingAdds(state);
-    if (!n) return;
+    const nAdd = await drainPendingAdds(state);
+    const nRead = await drainPendingReads(state);
+    if (!nAdd && !nRead) return;
     await persist();
     renderAll();
-    if (!startup) toast(`弹窗收藏：已加入 ${n} 个网站`);
+    if (!startup) {
+      if (nAdd) toast(`弹窗收藏：已加入 ${nAdd} 个网站`);
+      if (nRead) toast(`已加入稍后读 ${nRead} 篇`);
+    }
   } catch (err) {
     console.warn('drain pending adds failed', err);
   }
@@ -166,6 +171,7 @@ function bind() {
   bindPomodoro();
   bindCalendar();
   bindGlobal();
+  bindReading();
   // 系统「减少动态效果」变化 + 电池供电降频，只在这里接一次
   watchMotionPref();
 
@@ -451,6 +457,7 @@ export function renderAll() {
   renderEngines();
   renderTabs();
   renderGrid();
+  renderReading();
   renderTodo();
   renderDock();
   syncSettingsUI();

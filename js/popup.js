@@ -5,7 +5,7 @@
 // 权限模型：activeTab——点图标这个动作本身就是授权，
 // 只对当前这一个页面临时生效，不申请任何常驻 host 权限。
 import {
-  appendPendingAdd, loadGroupList, loadPopupConf, savePopupConf
+  appendPendingAdd, appendPendingRead, loadGroupList, loadPopupConf, savePopupConf
 } from './core/store.js';
 
 const $ = (id) => document.getElementById(id);
@@ -101,9 +101,15 @@ async function init() {
   // 表单先填上，简介异步补：抓取慢一点不应该让人干等
   $('title').value = String(tab.title || '').slice(0, 60);
 
+  // 稍后读先绑上：它跟分组无关，后面任何一条 return 都不该把它带走。
+  // 只留网址和标题 —— 稍后读本来就不该让人填表单。
+  $('btnRead').addEventListener('click', () => saveRead(url, tab));
+
   const groups = await loadGroupList();
   if (!groups.length) {
-    blockPage('还没有任何分组，先在新标签页里建一个。');
+    $('group').innerHTML = '<option value="">还没有分组</option>';
+    $('btnSave').disabled = true;
+    setStatus('先在新标签页建个分组才能收藏；稍后读随时可用');
     return;
   }
   for (const g of groups) {
@@ -120,7 +126,7 @@ async function init() {
   const existing = findExisting(url, groups);
   if (existing) {
     $('btnSave').disabled = true;
-    setStatus(`已在收藏中（${existing.name}）`);
+    setStatus(`已在收藏中（${existing.name}），可加入稍后读`);
     return;
   }
 
@@ -148,5 +154,24 @@ async function save(url, tab) {
     console.error('save failed', err);
     setStatus('收藏失败，请重试', 'err');
     $('btnSave').disabled = false;
+  }
+}
+
+/* 只存网址和标题，不进分组、不填简介。
+   点开时由 newtab 侧注入阅读排版（js/reader.js），不用在这里做任何抓取。 */
+async function saveRead(url, tab) {
+  const btn = $('btnRead');
+  btn.disabled = true;
+  try {
+    await appendPendingRead({
+      url,
+      title: String($('title').value || tab.title || '').trim().slice(0, 140)
+    });
+    setStatus('已加入稍后读，切到新标签页就能看到', 'ok');
+    setTimeout(() => window.close(), 700);
+  } catch (err) {
+    console.error('saveRead failed', err);
+    setStatus('加入失败，请重试', 'err');
+    btn.disabled = false;
   }
 }

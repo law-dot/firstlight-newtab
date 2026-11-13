@@ -28,6 +28,18 @@
   }
   #btnSave:disabled { opacity: 0.45; cursor: default; }
   #btnSave:not(:disabled):active { transform: scale(0.98); }
+  #btnRead {
+    width: 100%; margin-top: 8px; padding: 8px 0;
+    border: 1px solid color-mix(in srgb, canvastext 20%, transparent);
+    border-radius: 9px; font: inherit; font-weight: 400;
+    background: transparent; color: canvastext; cursor: pointer;
+  }
+  #btnRead:not(:disabled):hover { border-color: #7c6cf6; color: #7c6cf6; }
+  #btnRead:not(:disabled):active { transform: scale(0.98); }
+  #btnRead:disabled { opacity: 0.45; cursor: default; }
+  .hint {
+    font-size: 11px; line-height: 1.5; opacity: 0.5; margin-top: 7px; text-align: center;
+  }
   #status { font-size: 12px; margin-top: 9px; min-height: 18px; opacity: 0.7; text-align: center; }
   #status.err { opacity: 1; color: #c0392b; }
   #status.ok { opacity: 1; color: #1d9e75; }
@@ -49,6 +61,8 @@
     <label for="group">收藏到分组</label>
     <select id="group"></select>
     <button id="btnSave">完成收藏</button>
+    <button id="btnRead" title="只存网址，不填简介也不进分组；读的时候自动切到干净的阅读排版">加入稍后读</button>
+    <div class="hint">稍后读不进分组，读的时候会替你清掉广告和导航</div>
     <div id="status"></div>
   </div>
   <div id="blocked" class="blocked" hidden>

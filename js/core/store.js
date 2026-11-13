@@ -6,13 +6,13 @@ const DB_NAME = 'monk';
 const DB_STORE = 'files';
 
 // 逻辑段：数据模型层的划分，内存里仍是 data.settings / data.groups / ...
-export const SECTIONS = ['settings', 'groups', 'todos', 'dock', 'events', 'feeds', 'calfeeds', 'stats'];
+export const SECTIONS = ['settings', 'groups', 'todos', 'dock', 'events', 'feeds', 'calfeeds', 'reading', 'stats'];
 // 「一段一条记录」的简单段。groups 例外：它按分组拆成多条记录，见下
 // feeds = 订阅的「配置」（地址/名称/颜色，要跨设备同步）
 // calfeeds = 订阅的「内容」（抓到的日历事件，只存本机，永不参与同步）
 //   两者必须分开：几百个事件的 ICS 塞进 monk.feeds.v1 会撞 8KB 单项上限，
 //   整个 feeds 段一起不同步（与 1.1.0 分组超限同款问题）。
-export const SIMPLE_SECTIONS = ['settings', 'todos', 'dock', 'events', 'feeds', 'calfeeds', 'stats'];
+export const SIMPLE_SECTIONS = ['settings', 'todos', 'dock', 'events', 'feeds', 'calfeeds', 'reading', 'stats'];
 
 const sectionKey = (s) => `monk.${s}.v1`;
 const SYNC_CONF_KEY = 'monk.syncconf.v1'; // 同步配置只存本机，永不参与同步
@@ -124,6 +124,7 @@ export function makeDefault() {
     events: [],
     feeds: [],
     calfeeds: {},
+    reading: [],
     stats: {}
   };
 }
@@ -162,6 +163,64 @@ function normalizeCalFeeds(raw) {
     }
   }
   return out;
+}
+
+/* ---------- 稍后读（1.5.0） ----------
+   一条只留五样：能跳回去、能认出来、能排序、知道读没读。
+   正文不进库 —— 这是「稍后读」，不是「存档」。
+   只存本机（见 sync.js 的 LOCAL_ONLY）：条目一多必然撞 storage.sync 的
+   8KB 单项上限，而「这台机器上还欠几篇没读」本来就该各机各算。 */
+export const READING_MAX = 500;
+
+export function hostOfUrl(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+// 查重键：只去锚点和末尾斜杠，与 pending.js 的 normUrl 保持同一口径
+const readingKey = (u) => String(u || '').trim().replace(/#.*$/, '').replace(/\/+$/, '');
+
+function normalizeReading(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const r of raw) {
+    if (!r || typeof r.url !== 'string' || !/^https?:\/\//i.test(r.url)) continue;
+    const key = readingKey(r.url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const host = String(r.host || '').slice(0, 80) || hostOfUrl(r.url);
+    out.push({
+      id: r.id || uid(),
+      url: String(r.url).slice(0, 2000),
+      title: String(r.title || '').slice(0, 140) || host,
+      host,
+      addedAt: Number(r.addedAt) || Date.now(),
+      readAt: Number(r.readAt) || 0
+    });
+  }
+  // 新加的在前；超上限优先丢「最旧的已读」——读完的本来就该给没读的让位
+  out.sort((a, b) => b.addedAt - a.addedAt);
+  return pruneReading(out);
+}
+
+// 抽出来公用（pending.js 的排空队列也走同一条规则）：
+// 第一遍从最旧端丢已读，还没够数再从最旧端丢未读。
+export function pruneReading(out) {
+  const over = out.length - READING_MAX;
+  if (over <= 0) return out;
+  const doomed = new Set();
+  let need = over;
+  for (let i = out.length - 1; i >= 0 && need > 0; i--) {
+    if (out[i].readAt) { doomed.add(i); need--; }
+  }
+  for (let i = out.length - 1; i >= 0 && need > 0; i--) {
+    if (!doomed.has(i)) { doomed.add(i); need--; }
+  }
+  return out.filter((_, i) => !doomed.has(i));
 }
 
 export function normalize(raw) {
@@ -310,6 +369,7 @@ export function normalize(raw) {
     events,
     feeds,
     calfeeds,
+    reading: normalizeReading(raw.reading),
     stats
   };
 }
@@ -817,6 +877,26 @@ export async function appendPendingAdd(item) {
 export async function takePendingAdds() {
   const raw = (await kvGet([PENDING_ADDS_KEY]))[PENDING_ADDS_KEY];
   await kvRemove([PENDING_ADDS_KEY]);
+  return Array.isArray(raw?.v) ? raw.v : [];
+}
+
+/* 弹窗「加入稍后读」的队列（1.5.0）。理由与 pendingadds 完全一样：
+   popup 和 newtab 是两个运行环境，popup 直接改 monk.reading.v1 会和
+   newtab 的内存态并发打架（谁后写谁赢，另一边的改动凭空消失）。
+   队列条目只有 url / title / host / ts，比收藏更轻。 */
+export const PENDING_READS_KEY = 'monk.pendingreads.v1';
+
+export async function appendPendingRead(item) {
+  const raw = (await kvGet([PENDING_READS_KEY]))[PENDING_READS_KEY];
+  const items = Array.isArray(raw?.v) ? raw.v.slice(-(PENDING_MAX - 1)) : [];
+  items.push({ ...item, ts: Date.now() });
+  await kvSet({ [PENDING_READS_KEY]: { v: items, updatedAt: Date.now() } });
+  return items.length;
+}
+
+export async function takePendingReads() {
+  const raw = (await kvGet([PENDING_READS_KEY]))[PENDING_READS_KEY];
+  await kvRemove([PENDING_READS_KEY]);
   return Array.isArray(raw?.v) ? raw.v : [];
 }
 

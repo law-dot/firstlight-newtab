@@ -154,6 +154,11 @@
       <svg viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.6"/></svg>
       <span>RSS 订阅</span>
     </a>
+    <button class="side-pin" id="readingEntry" type="button" title="稍后读">
+      <svg viewBox="0 0 24 24"><path d="M12 6.5C10.2 4.9 7.8 4.2 4.5 4.2v13.6c3.3 0 5.7.7 7.5 2.3 1.8-1.6 4.2-2.3 7.5-2.3V4.2c-3.3 0-5.7.7-7.5 2.3z"/><path d="M12 6.5v13.6"/></svg>
+      <span>稍后读</span>
+      <span class="side-pin-badge" hidden id="readingBadge"></span>
+    </button>
     <div class="side-list" id="tabs"></div>
   </aside>
 
@@ -397,6 +402,28 @@
       </div>
       <p class="hint about-update" id="aboutUpdate">数据只存本机 · 开源在 GitHub</p>
     </section>
+  </aside>
+
+  <aside aria-hidden="true" class="rpanel" id="readingPanel">
+    <div class="rpanel-head">
+      <h2>稍后读</h2>
+      <button aria-label="关闭" class="icon-btn" id="readingClose">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <input class="rpanel-search" id="readingSearch" placeholder="筛选标题或网址" spellcheck="false" type="text">
+    <ul class="rpanel-list" id="readingList"></ul>
+    <div class="rpanel-empty" hidden id="readingEmpty">没有符合条件的条目</div>
+    <div class="rpanel-foot">
+      <span class="rpanel-count" id="readingCount"></span>
+      <span class="rpanel-flex"></span>
+      <button class="btn small" hidden id="readingClear" type="button">清除已读</button>
+    </div>
+    <div class="rpanel-grant" id="readingGrantRow">
+      <span class="rpanel-grant-text" id="readingGrantText"></span>
+      <button class="btn small primary" hidden id="readingGrant" type="button"
+              title="授权后，从稍后读打开的页面右下角会出现「阅读模式」浮窗">开启阅读净化</button>
+    </div>
   </aside>
 
   <dialog class="dlg" id="siteDialog">

@@ -86,7 +86,10 @@ const LOCAL_ONLY = new Set([
   'monk.syncconf.v1', 'monk.feedcache.v1', 'monk.calfeeds.v1',
   'monk.migrate.backup.v1', 'monk.data.v1', 'monk.groups.v1',
   // 弹窗收藏的瞬态队列与本机偏好：本机产生、本机消费，同步过去毫无意义
-  'monk.pendingadds.v1', 'monk.popupconf.v1'
+  'monk.pendingadds.v1', 'monk.popupconf.v1',
+  // 稍后读（1.5.0）：条目会攒到上百条，塞进 storage.sync 必然撞 8KB 单项上限；
+  // 「这台机器还欠几篇没读」本来就是各机器各算的事。将来按分组分片再谈同步。
+  'monk.reading.v1', 'monk.pendingreads.v1'
 ]);
 const isOurs = (key) =>
   typeof key === 'string' && key.startsWith('monk.') && !LOCAL_ONLY.has(key);

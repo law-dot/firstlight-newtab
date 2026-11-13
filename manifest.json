@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "初见 · 新标签页",
-  "version": "1.4.0",
-  "description": "初见 Firstlight：本地优先的新标签页，分组网站图标、搜索、壁纸与待办。数据只存在本机。",
+  "version": "1.5.0",
+  "description": "初见 Firstlight：本地优先的新标签页，分组网站图标、搜索、壁纸、待办与稍后读。数据只存在本机。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuQiYsyTAetIO+ZBkmtR2jdhgo7E0FHY7KB4rTdVtBjTDfMWLFoOMUqF9/RN8vOua2k4LXK8mUiQ/CgLyVmZq1iGfQTfzEshUcDUWLgsePYGtWbtQ7kPxePhx7i4w0REQiuOw0JsmIy342mp8nzQ8/heTDMqEwcvbQy6WzH9FnGhL88ySywXcqpnyKMMoQPAQGVgVIFaoIiEe8vE2zubdQm4Ircj7zI0o2jRFOQ8sganIhoocGl9ZBc/3sea0SmNzV5CTL39ZmoBIM2t3c43vHp7IZFxANhsf5vdicZHVpp7HElS0lJkYveEkBFiMY0hYkr4p4G0VSMnV70TPgtn7gQIDAQAB",
   "chrome_url_overrides": {
     "newtab": "newtab.html"
