@@ -40,6 +40,22 @@ export function compareVer(a, b) {
   return A.pre > B.pre ? 1 : -1;
 }
 
+/* 代际比较：只看「主.次」，patch 与预发布后缀一律忽略。
+   用途是同步的版本保护 —— 它要判的是「对面那版的数据格式是不是比我新」，
+   而 patch 级差异（1.4.0 / 1.4.3）共用同一套字段与墓碑能力，不存在降级风险。
+   反过来，若按完整版本比，把某个版本号改小（比如把内测的 1.4.3 归并进
+   1.4.0 发布）就会让所有设备被判成「云端更新」而集体拒绝上传。
+   真正需要拦的跨代（1.5 读 1.4 的数据）由 caps 与这个函数一起守住。 */
+export function compareFamily(a, b) {
+  const A = parseVer(a);
+  const B = parseVer(b);
+  if (!A || !B) return 0;
+  for (let i = 0; i < 2; i += 1) {
+    if (A.nums[i] !== B.nums[i]) return A.nums[i] > B.nums[i] ? 1 : -1;
+  }
+  return 0;
+}
+
 /* ---------------- 本地缓存 ---------------- */
 
 function hasChromeLocal() {

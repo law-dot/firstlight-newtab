@@ -34,7 +34,7 @@ import {
   saveSyncConf
 } from './store.js';
 import { toast } from './utils.js';
-import { compareVer } from './update.js';
+import { compareVer, compareFamily } from './update.js';
 
 const hasSync =
   typeof chrome !== 'undefined' && !!(chrome.storage && chrome.storage.sync);
@@ -874,12 +874,14 @@ async function davRoundInner() {
   const cloudCaps = Array.isArray(got.snapshot?.caps) ? got.snapshot.caps.map(String) : [];
 
   /* 版本不对称的三档，先判再合并：
-     ① 云端由比本机更新的版本写过 → 拒绝写。全量 PUT 是覆盖式的，
+     ① 云端由比本机更新的**代**（主.次）写过 → 拒绝写。全量 PUT 是覆盖式的，
         旧代码不认识新字段，写一次就把新版的数据降级了。
+        patch 级差异不算（1.4.0 与 1.4.3 同一套字段与墓碑能力），
+        否则把版本号改小这种正常操作会让全设备集体拒绝上传。
      ② 云端没有 appVer（1.4.0 之前的版本写的）→ 它能读我们的，但我们
         推上去的 sitetombs 它读不懂、下次全量推送会抹掉。只能告警。
      ③ 两边都够新 → 正常。 */
-  if (got.snapshot && cloudVer && compareVer(cloudVer, mine) > 0) {
+  if (got.snapshot && cloudVer && compareFamily(cloudVer, mine) > 0) {
     lastDavPeer = { ver: cloudVer, caps: cloudCaps, legacy: false, newer: true };
     lastDavCheck = { ok: false, error: 'newercloud', at: Date.now() };
     return { ok: false, reason: 'newercloud', cloudVer };
@@ -1157,7 +1159,7 @@ export async function getSyncStatus() {
         ? {
             ver: got.snapshot.appVer || '',
             legacy: !got.snapshot.appVer || compareVer(got.snapshot.appVer, CAPS_VER) < 0,
-            newer: !!got.snapshot.appVer && compareVer(got.snapshot.appVer, appVersion()) > 0,
+            newer: !!got.snapshot.appVer && compareFamily(got.snapshot.appVer, appVersion()) > 0,
             caps: Array.isArray(got.snapshot.caps) ? got.snapshot.caps.map(String) : []
           }
         : null,
