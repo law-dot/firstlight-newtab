@@ -786,10 +786,13 @@ export async function saveData(data, stamp = Date.now()) {
     changed.push(GROUP_INDEX_KEY);
   }
 
+  // 本页手动改动记一笔，见 recentWrites 的注释（防同步把刚改的东西拉回旧值）。
+  // 必须在写盘之前记：写盘是异步的，写完再记的话，中间这几毫秒里恰好到达的
+  // 一轮「远端覆盖」会认为本页没改过，把旧值写回来。
+  markLocalWrite(changed);
+
   if (Object.keys(writes).length) await kvSet(writes);
   if (removes.length) await kvRemove(removes);
-  // 本页手动改动记一笔，见 recentWrites 的注释（防同步把刚改的东西拉回旧值）
-  markLocalWrite(changed);
   return changed; // 变更的存储键，同步引擎据此决定推送范围
 }
 

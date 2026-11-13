@@ -260,7 +260,14 @@ export function setWallpaper(wallpaper) {
   appliedSig = null;
   // 兜底带上 blur：调用点只关心自己那一项，不该顺手把模糊程度抹掉
   const prev = state.data.settings.wallpaper || {};
-  state.data.settings.wallpaper = { ...wallpaper, blur: wallpaper.blur ?? prev.blur ?? 12 };
+  /* wallpaperAt 是这一项自己的时间戳：同步合并整段设置时按它取新的那份。
+     没有它的话，另一台机器（或还开着旧窗口的页面）把旧壁纸连着新时间戳
+     推上来，这边刚换的就被盖回去了。 */
+  state.data.settings.wallpaper = {
+    ...wallpaper,
+    blur: wallpaper.blur ?? prev.blur ?? 12,
+    wallpaperAt: Date.now()
+  };
   persist();
   applyWallpaper();
   syncSettingsUI();
@@ -272,7 +279,14 @@ export function setWallpaper(wallpaper) {
    applyWallpaper，页面就会一片一片地闪（1.4.1 报的「形状一直闪」正是这个）。 */
 let appliedSig = null;
 
+/* 世代号：每次调用 +1。取图 / 下载都要等网络，等回来时用户可能已经换了壁纸
+   （setWallpaper 会再调一次 applyWallpaper）。旧的那次如果照着 old 结果往下画，
+   就会把新壁纸盖回旧图 —— 表现正是「换完闪一下又回到原来那张」。
+   每次 await 之后对一下号，过期就地退出，一个像素都不碰。 */
+let applySeq = 0;
+
 export async function applyWallpaper({ advanceOnline = false } = {}) {
+  const ticket = ++applySeq;
   const wallpaper = state.data.settings.wallpaper;
   const bg = $('#bg');
   state.currentCredit = '';
@@ -293,6 +307,7 @@ export async function applyWallpaper({ advanceOnline = false } = {}) {
 
   if (wallpaper.type === 'image') {
     const blob = await getWallpaper();
+    if (ticket !== applySeq) return; // 等图期间又换了壁纸：这次结果作废
     if (blob) {
       put(`image:${blob.size}:${blob.type}`, () => {
         state.bgUrl = URL.createObjectURL(blob);
@@ -311,6 +326,7 @@ export async function applyWallpaper({ advanceOnline = false } = {}) {
     });
   } else if (wallpaper.type === 'online') {
     const item = await ensureOnline(wallpaper, advanceOnline);
+    if (ticket !== applySeq) return; // 抓图期间又换了壁纸：别把在线图盖回去
     if (item) {
       state.currentCredit = item.credit || '';
       // 签名用图片地址：同一张图（每日图、未到轮播点）不会被反复重设
@@ -340,6 +356,18 @@ export async function applyWallpaper({ advanceOnline = false } = {}) {
   // 固定遮罩由 CSS 控制（1.2.3 起不再可调），这里只负责把署名写上去
   $('#bgCredit').textContent = state.currentCredit;
   syncSettingsUI();
+}
+
+/* 在线壁纸取哪一张：单独抽出来是为了能直接跑单测（DOM 相关的部分测不了）。
+   rotate 模式按 cursor 轮播；其他模式按 pick 记住用户「换一张」选中的那张，
+   只有列表是新抓的（跨天 / 换源）才回到第一张。 */
+export function startIndex({ cursor = 0, pick = 0, len = 1, rotate = false, advance = false, freshList = false } = {}) {
+  const n = Number(len) || 0;
+  if (!n) return 0;
+  const clamp = (v) => (((Number(v) || 0) % n) + n) % n;
+  if (rotate) return clamp(cursor);
+  const base = freshList && !advance ? 0 : clamp(pick);
+  return advance ? (base + 1) % n : base;
 }
 
 /* ================= 在线壁纸 ================= */
@@ -382,12 +410,21 @@ async function ensureOnline(wallpaper, advance) {
       if (!list.length) continue;
     }
 
-    const rotate = state.data.settings.onlineMode === 'rotate';
-    const start = rotate
-      ? (online.cursor || 0) % list.length
-      : advance
-        ? state.manualIndex % list.length
-        : 0;
+    const mode = state.data.settings.onlineMode;
+    const rotate = mode === 'rotate';
+    const len = list.length;
+    /* 每日模式的起点以前写死 0：只要页面重载一次（同步回声、切回前台、
+       30 分钟检查），「换一张」选中的那张就被刷回最新那张 —— 用户看到的就是
+       「换完闪一下又回到原来那张」。现在把选择存进设置（online.pick），
+       重渲染接着用同一张；列表是新抓的（跨天/换源）时才回到 0。 */
+    const start = startIndex({
+      cursor: online.cursor,
+      pick: online.pick,
+      len,
+      rotate,
+      advance,
+      freshList: !attempt.images
+    });
     const order = [start, ...list.map((_, i) => i).filter((i) => i !== start)].slice(0, 3);
 
     // 某个源即便列表拿到了，图片也可能下不下来，这时继续试下一个源
@@ -401,6 +438,10 @@ async function ensureOnline(wallpaper, advance) {
       }
       if (!blob) continue;
 
+      /* 用户已经换走壁纸了（这期间点了预设/上传/别的源）：这次抓到的图只留在
+         blob 缓存里，别再写回设置 —— 否则设置会被「在线壁纸」重新占回去。 */
+      if (wallpaper !== state.data.settings.wallpaper) return null;
+
       /* 只有真的变了才落盘。以前这里无条件 persist()，而 fetchedAt: Date.now()
          每次都不同 —— 于是每开一个新标签页就写一次设置、触发一次同步推送
          （WebDAV 下是整轮 GET+PUT），多窗口时还会来回互相触发重载。
@@ -410,16 +451,15 @@ async function ensureOnline(wallpaper, advance) {
         source: attempt.source?.id || attempt.source || online.source,
         sourceName: attempt.sourceName || attempt.source.name,
         images: list,
-        cursor: rotate ? (i + 1) % list.length : i
+        cursor: rotate ? (i + 1) % list.length : online.cursor || 0,
+        pick: rotate ? online.pick || 0 : i   // 每日模式记住「换一张」选中的那张
       };
       const changed = JSON.stringify(next) !== JSON.stringify(online);
       wallpaper.online = next;
-      if (!rotate && advance) state.manualIndex = (i + 1) % list.length;
+      if (!rotate) state.manualIndex = (i + 1) % list.length;
       if (changed) {
         persist();
         pruneOnlineCache(list);
-      } else {
-        state.manualIndex = state.manualIndex || 0;
       }
       return { ...image, blob };
     }

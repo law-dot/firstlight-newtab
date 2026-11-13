@@ -39,6 +39,22 @@ import { compareVer } from './update.js';
 const hasSync =
   typeof chrome !== 'undefined' && !!(chrome.storage && chrome.storage.sync);
 
+const SETTINGS_KEY = 'monk.settings.v1';
+
+/* 壁纸这一项单独按 wallpaperAt 比新旧。
+   整段设置用 LWW 合并时，另一端（尤其还在跑老版本的机器，或者一个还开着旧
+   内存态的窗口）会把「旧壁纸 + 新时间戳」整份推上来，对本机来说就是
+   「刚换的那张闪一下又被盖回去」。其他字段照旧按记录时间戳裁决，
+   只有 wallpaper 这一项取 wallpaperAt 更大的那份。 */
+export function keepNewerWallpaper(remoteV, localV) {
+  const lw = localV?.wallpaper;
+  const rw = remoteV?.wallpaper;
+  if (!lw || !rw) return remoteV;
+  const la = Number(lw.wallpaperAt) || 0;
+  const ra = Number(rw.wallpaperAt) || 0;
+  return la > ra ? { ...remoteV, wallpaper: lw } : remoteV;
+}
+
 /* 本机版本：只用来给快照打标记，不从 app.js 引（那会绕成循环依赖）。
    自检页里没有扩展上下文，用 __FIRSTLIGHT_VERSION__ 顶一下。 */
 function appVersion() {
@@ -231,6 +247,18 @@ export async function pullMerge(remote) {
          时间戳永远比这里新。不挡的话，用户刚换的壁纸会在几秒后被拉回旧的那张，
          表现就是「闪一下又变回原来的」。窗口外的合并照常按时间戳走。 */
       if (isRecentLocalWrite(key)) continue;
+      if (key === SETTINGS_KEY) {
+        const mergedV = keepNewerWallpaper(r.v, l?.v);
+        if (mergedV !== r.v) {
+          /* 壁纸这一项本机更新：只把这一个字段留住不够，还得带着新时间戳
+             回传一次，否则云端一直存着旧壁纸，下次重启又从那边拉回来。 */
+          const rec = { v: mergedV, updatedAt: Math.max(rt, Date.now()) };
+          await saveUnit(key, rec);
+          toPush[key] = rec;
+          pulled = true;
+          continue;
+        }
+      }
       await saveUnit(key, r);
       pulled = true;
     } else if (l && l.v != null && lt > rt) {
@@ -540,7 +568,8 @@ async function applyRemote(touched, changes) {
     // 严格大于才拉回：自己推送的回声（updatedAt 相等）自然被跳过
     if ((rec.updatedAt || 0) > lt) {
       if (isRecentLocalWrite(key)) continue; // 刚在本页改过，别被别人的旧值盖回（同 pullMerge）
-      await saveUnit(key, rec);
+      const v = key === SETTINGS_KEY ? keepNewerWallpaper(rec.v, local[key]?.v) : rec.v;
+      await saveUnit(key, v === rec.v ? rec : { ...rec, v });
       pulled = true;
     }
   }

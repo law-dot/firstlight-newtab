@@ -4,7 +4,7 @@ export const VERSION =
   typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest
     ? chrome.runtime.getManifest().version
     : '1.0.0';
-import { loadData } from './core/store.js';
+import { loadData, isRecentLocalWrite } from './core/store.js';
 import { state, persist } from './core/state.js';
 import { initSync, onSyncRemote, backgroundPull } from './core/sync.js';
 import { drainPendingAdds, watchPendingAdds } from './core/pending.js';
@@ -58,9 +58,17 @@ async function init() {
   onSyncRemote(async () => {
     const next = await loadData();
     const sig = JSON.stringify(next);
+    if (sig === dataSig) return; // 内容一模一样：连 state.data 都不换
+    /* 壁纸刚在本页换过（10 秒保护窗）：这一轮重载可能是别的窗口/设备带着**旧设置**
+       推上来的（它们的内存态还是上一张），整份换掉就会「换完闪一下又变回去」。
+       其他内容照收，壁纸保留本页这次的；下一次本页写盘会把设置重新顶正。 */
+    if (isRecentLocalWrite('monk.settings.v1')) {
+      next.settings.wallpaper = state.data.settings.wallpaper;
+      // 存储里那份已经被别人写成旧值了，把本页这份顶回去（带新时间戳）
+      persist();
+    }
     state.data = next;
-    if (sig === dataSig) return;
-    dataSig = sig;
+    dataSig = JSON.stringify(next);
     renderAll();
     applyTheme();
     await applyWallpaper();
