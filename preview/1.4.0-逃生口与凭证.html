@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>1.4.0 逃生口与凭证 · 自检</title>
+<style>
+  body { font: 13px/1.7 -apple-system, sans-serif; margin: 24px; max-width: 780px; }
+  h1 { font-size: 16px; }
+  pre { background: #f6f6f4; border: 1px solid #ddd; padding: 14px; border-radius: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>1.4.0 逃生口与凭证 · 自检</h1>
+<p>配本机故障模拟 WebDAV（<code>127.0.0.1:8766</code>）。验证「以云端覆盖本机」的 WebDAV 版、
+无快照/认证失败/未开启三条错误分支、以及清除凭证的数据层。</p>
+<pre id="out">运行中…</pre>
+<script type="module">
+const out = [];
+const ok = (name, cond, extra = '') => out.push([!!cond, name, extra]);
+
+try {
+  const {
+    loadData, saveData, loadSections, loadUnits, loadSyncConf, saveSyncConf,
+    clearWebdavCreds, GROUP_INDEX_KEY, SITE_TOMBS_KEY
+  } = await import('../js/core/store.js');
+  const { overwriteLocalFromRemote, reloadSyncConf, resetDavCooldown } =
+    await import('../js/core/sync.js');
+
+  const BASE = 'http://127.0.0.1:8766/ok/';
+  const CRED = { url: BASE, username: 'u@example.com', password: 'app-pass' };
+
+  /* ---------- 预置：本地有一个云端没有的分组，且本地删过一张卡（有墓碑） ---------- */
+  const local = await loadData();
+  local.groups.push({
+    id: 'glocal01',
+    title: '只在本地',
+    sites: [
+      { id: 'sKeep', title: '留下', url: 'https://keep.example' },
+      { id: 'sGone', title: '已知删除', url: 'https://gone.example' }
+    ]
+  });
+  await saveData(local);
+  const local2 = await loadData();
+  const lg = local2.groups.find((g) => g.id === 'glocal01');
+  lg.sites = lg.sites.filter((s) => s.id !== 'sGone');
+  await saveData(local2);
+
+  const u1 = await loadUnits();
+  ok('[1] 本地已产生卡片墓碑 sGone', !!(u1[SITE_TOMBS_KEY]?.v?.sGone),
+     JSON.stringify(u1[SITE_TOMBS_KEY]?.v || {}));
+
+  /* ---------- 云端快照：另一个分组 gCloud（含 sGone，且没有本地那个分组） ---------- */
+  const snap = {
+    app: 'firstlight', ver: 1, savedAt: Date.now(), deviceId: 'test',
+    records: {
+      [GROUP_INDEX_KEY]: { v: ['gCloud'], d: {}, updatedAt: 1000 },
+      'monk.group.gCloud.v1': {
+        v: {
+          id: 'gCloud', title: '云端分组',
+          sites: [
+            { id: 'sGone', title: '云端还有', url: 'https://r.example' },
+            { id: 'sNew', title: '云端新增', url: 'https://n.example' }
+          ]
+        },
+        updatedAt: 1000
+      },
+      'monk.settings.v1': { v: { ...local2.settings, engine: 'tav' }, updatedAt: 1000 }
+    }
+  };
+  await fetch(BASE + 'firstlight-sync.json', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snap)
+  });
+
+  await saveSyncConf({ mode: 'webdav', webdav: CRED, deviceId: 'dtest', lastSyncAt: 0 });
+  await reloadSyncConf();
+
+  /* ---------- ① 强制以云端为准（不看时间戳） ---------- */
+  const r1 = await overwriteLocalFromRemote();
+  const secs = await loadSections();
+  const ids = secs.groups.v.map((g) => g.id);
+  ok('[2] 覆盖成功并报告条数', r1.ok === true && r1.count >= 3, JSON.stringify(r1));
+  ok('[3] 云端分组已进来', ids.includes('gCloud'), ids.join(','));
+  ok('[4] 本地独有分组被清掉（索引与分片都没了）', !ids.includes('glocal01'), ids.join(','));
+  const gCloud = secs.groups.v.find((g) => g.id === 'gCloud');
+  ok('[5] 本地墓碑被云端接管：sGone 重新可见',
+     !!gCloud && gCloud.sites.some((s) => s.id === 'sGone'),
+     (gCloud?.sites || []).map((s) => s.id).join(','));
+  ok('[6] 云端新增的卡也在', !!gCloud && gCloud.sites.some((s) => s.id === 'sNew'));
+  ok('[7] 设置以云端为准（即使云端时间戳更旧）', secs.settings.v.engine === 'tav', secs.settings.v.engine);
+  const confAfter = await loadSyncConf();
+  ok('[8] lastSyncAt 已更新', confAfter.lastSyncAt > 0, String(confAfter.lastSyncAt));
+
+  /* ---------- ② 云端没有快照：明确说 empty，而不是「恢复 0 项」 ---------- */
+  await fetch(BASE + 'firstlight-sync.json', { method: 'DELETE' });
+  const r2 = await overwriteLocalFromRemote();
+  ok('[9] 无快照 → reason empty', r2.ok === false && r2.reason === 'empty', JSON.stringify(r2));
+
+  /* ---------- ③ 认证失败 → auth（不静默成功） ---------- */
+  resetDavCooldown();
+  await saveSyncConf({ mode: 'webdav', webdav: { ...CRED, url: 'http://127.0.0.1:8766/secured/' }, deviceId: 'dtest' });
+  await reloadSyncConf();
+  const r3 = await overwriteLocalFromRemote();
+  ok('[10] 401 → reason auth', r3.ok === false && r3.reason === 'auth', JSON.stringify(r3));
+
+  /* ---------- ④ 未开启同步 → off ---------- */
+  resetDavCooldown();
+  await saveSyncConf({ mode: 'off', webdav: CRED, deviceId: 'dtest' });
+  await reloadSyncConf();
+  const r4 = await overwriteLocalFromRemote();
+  ok('[11] 关闭状态 → reason off', r4.ok === false && r4.reason === 'off', JSON.stringify(r4));
+
+  /* ---------- ⑤ 清除凭证：只擦密码，URL/账号留着方便重填 ---------- */
+  await saveSyncConf({
+    mode: 'webdav',
+    webdav: { url: BASE, username: 'u@example.com', password: 'secret-16-chars' },
+    deviceId: 'dtest'
+  });
+  const cleared = await clearWebdavCreds();
+  const c = await loadSyncConf();
+  ok('[12] 清除后密码为空、模式归 off', c.webdav.password === '' && c.mode === 'off',
+     `${c.mode}/${String(c.webdav.password).length}`);
+  ok('[13] URL 与账号保留（便于重填）',
+     c.webdav.url === BASE && c.webdav.username === 'u@example.com');
+  ok('[14] 返回值与落盘一致', cleared.webdav.password === '' && cleared.mode === 'off');
+} catch (err) {
+  out.push([false, '自检页异常', String((err && err.stack) || err)]);
+}
+
+const pass = out.filter(([c]) => c).length;
+const lines = out.map(([c, name, extra]) => `${c ? '✓' : '✗'} ${name}${extra ? ` · ${extra}` : ''}`);
+lines.push('', `${pass}/${out.length} 通过`);
+document.getElementById('out').textContent = lines.join('\n');
+document.title = `${pass}/${out.length} · 1.4.0 自检`;
+</script>
+</body>
+</html>

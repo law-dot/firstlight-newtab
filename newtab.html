@@ -340,10 +340,12 @@
         <input id="davUser" autocomplete="off" placeholder="账号（坚果云填注册邮箱）">
         <input id="davPass" type="password" placeholder="应用密码（坚果云在「账户信息→安全选项」生成）">
         <p class="hint">坚果云：地址必须以 <code>/dav</code> 结尾，账号是注册邮箱，密码是「应用密码」而不是登录密码。目录要先在网盘里建好。</p>
+        <p class="hint">凭据只存在本机的扩展存储里、不会上传，但是明文保存。共用电脑或怀疑泄露时点「清除凭证」。</p>
         <div class="row">
           <button class="btn small" id="btnDavSave" type="button">保存并连接</button>
           <button class="btn small" id="btnDavTest" type="button">测试连接</button>
           <button class="btn small" id="btnDavDiag" type="button">诊断</button>
+          <button class="btn small" id="btnDavClear" type="button">清除凭证</button>
         </div>
       </div>
       <div class="row" id="syncActions" hidden>

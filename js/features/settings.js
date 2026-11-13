@@ -3,7 +3,7 @@ import { state, persist } from '../core/state.js';
 import { $, $$, toast } from '../core/utils.js';
 import {
   normalize, makeDefault, clearWallpaper,
-  loadData, loadSyncConf, saveSyncConf
+  loadData, loadSyncConf, saveSyncConf, clearWebdavCreds
 } from '../core/store.js';
 import {
   initSync, isSyncAvailable, overwriteLocalFromRemote,
@@ -183,7 +183,7 @@ function paintSyncUI() {
   const davForm = $('#webdavForm');
   const actions = $('#syncActions');
   const status = $('#syncStatus');
-  if (pullBtn) pullBtn.hidden = syncConf.mode !== 'browser';
+  if (pullBtn) pullBtn.hidden = syncConf.mode === 'off';
   if (davForm) davForm.hidden = syncConf.mode !== 'webdav';
   if (actions) actions.hidden = syncConf.mode === 'off';
   if (status) {
@@ -382,6 +382,26 @@ async function testDav() {
   );
 }
 
+/* 清除本机保存的网盘凭据。
+   密码是明文存在 chrome.storage.local 的——扩展里没有可信的本地密钥可用，
+   「加密」只能把钥匙和锁放进同一个抽屉，是假安全。所以不假装加密，
+   至少要给一个立刻擦掉的出口：共用电脑、换网盘、怀疑泄露时用。
+   只清密码并切回「关闭」，URL/账号保留，重新输入密码即可恢复。 */
+async function clearDavCreds() {
+  const yes = window.confirm(
+    '清除后本机不再保存网盘密码，同步会切回「关闭」。\n' +
+      '网盘上的快照不会删除，重新填写密码即可继续同步。\n\n确定清除吗？'
+  );
+  if (!yes) return;
+  await clearWebdavCreds();
+  await reloadSyncConf();
+  syncConf = await loadSyncConf();
+  const pass = $('#davPass');
+  if (pass) pass.value = '';
+  paintSyncUI();
+  toast('已清除本机保存的网盘密码');
+}
+
 /* 诊断：5 步逐条列在状态区，用户可以直接截图或复制发过来 */
 async function runDavDiag(auto) {
   const el = $('#syncStatus');
@@ -434,13 +454,19 @@ async function setSyncMode(mode) {
 
 // 手动「以云端为准」：覆盖前先确认，避免误点丢数据
 async function pullFromRemote() {
+  const viaDav = syncConf?.mode === 'webdav';
+  const src = viaDav ? '网盘上的快照' : '云端';
   const yes = window.confirm(
-    '这会用云端的数据覆盖本机的分组、待办、订阅源等全部内容，且无法撤销。\n\n确定继续吗？'
+    `这会用${src}覆盖本机的分组、待办、订阅源等全部内容，且无法撤销。\n\n` +
+      '本机比云端新的改动会一并丢失。确定继续吗？'
   );
   if (!yes) return;
+  toast(viaDav ? '正在从网盘读取快照…' : '正在从云端读取…');
   const res = await overwriteLocalFromRemote();
   if (!res.ok) {
-    toast(res.reason === 'off' ? '请先开启浏览器账号同步' : '云端没有可拉取的数据');
+    if (res.reason === 'off') toast('请先开启同步');
+    else if (res.reason === 'empty') toast(davErrText('empty'), 4500);
+    else toast(`覆盖失败：${davErrText(res.reason)}`, 4500);
     return;
   }
   state.data = await loadData();
@@ -449,7 +475,7 @@ async function pullFromRemote() {
   await applyWallpaper();
   syncConf = await loadSyncConf();
   paintSyncUI();
-  toast(`已从云端恢复 ${res.count} 项数据`);
+  toast(`已从${src}恢复 ${res.count} 项数据`);
 }
 
 /* ================= 抽屉开关 ================= */
@@ -627,6 +653,7 @@ export function bindSettings() {
     btn.addEventListener('click', () => setSyncMode(btn.dataset.val));
   });
   $('#btnSyncPull')?.addEventListener('click', pullFromRemote);
+  $('#btnDavClear')?.addEventListener('click', clearDavCreds);
   $('#btnSyncNow')?.addEventListener('click', doSyncNow);
   $('#btnSyncStatus')?.addEventListener('click', refreshSyncStatus);
   $('#btnDavSave')?.addEventListener('click', saveWebdav);

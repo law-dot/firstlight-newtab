@@ -369,7 +369,10 @@ async function pruneRemoteGroups(indexRec) {
 // 用途：某台设备先离线用过一阵（本地数据时间戳比云端还新），
 // 开启同步后按「新者胜」会把它推上去，把真正想要的云端数据冲掉。
 // 这个入口给用户一次显式的「我确定要云端那份」的机会。
+// 1.4.0 起两个后端都支持：WebDAV 之前只有 browser 分支，
+// 而 1.3.8 之后最需要这个逃生口的恰恰是用 WebDAV 的人。
 export async function overwriteLocalFromRemote() {
+  if (conf.mode === 'webdav') return overwriteFromWebdav();
   if (conf.mode !== 'browser' || !hasSync) return { ok: false, count: 0, reason: 'off' };
   try {
     const remote = await chrome.storage.sync.get(null);
@@ -379,6 +382,7 @@ export async function overwriteLocalFromRemote() {
       await saveUnit(key, rec);
       count += 1;
     }
+    // 索引在上面的循环里已按「我们的键」整份强制落盘，这里只按它清掉多余分组
     const idx = remote[GROUP_INDEX_KEY];
     if (idx) await reconcileGroups(idx, true);
     if (count) {
@@ -391,6 +395,36 @@ export async function overwriteLocalFromRemote() {
     console.warn('sync overwrite failed', err);
     return { ok: false, count: 0, reason: 'error' };
   }
+}
+
+/* WebDAV 版逃生口：读快照 → 逐条强制落盘（不看时间戳）→ 按云端索引清掉多余分组。
+   三条与 browser 版一致的语义，外加两条 WebDAV 特有的：
+   - 云端墓碑表也一并接管：本机私有的删除记录不能反过来把云端数据藏起来；
+   - 云端没有快照时明确返回 empty，而不是「成功恢复 0 项」这种让人误以为生效的结果。 */
+async function overwriteFromWebdav() {
+  const dconf = conf.webdav || {};
+  const got = await davGet(dconf);
+  if (got.error) return { ok: false, count: 0, reason: got.error };
+  if (!got.snapshot) return { ok: false, count: 0, reason: 'empty' };
+  const records = got.snapshot.records || {};
+  let count = 0;
+  for (const [key, rec] of Object.entries(records)) {
+    if (!isOurs(key) || rec?.v == null) continue;
+    await saveUnit(key, rec);
+    count += 1;
+  }
+  const remoteTombs = records[SITE_TOMBS_KEY];
+  if (remoteTombs) await saveUnit(SITE_TOMBS_KEY, remoteTombs);
+  else await removeUnit(SITE_TOMBS_KEY);
+  // 索引同样在上面的循环里整份落盘，这里只负责清掉云端索引之外的分组分片
+  const idx = records[GROUP_INDEX_KEY];
+  if (idx) await reconcileGroups(idx, true);
+  if (count) {
+    conf.lastSyncAt = Date.now();
+    await saveSyncConf(conf);
+  }
+  await markMerged();
+  return { ok: count > 0, count };
 }
 
 /* ---------- 接收其他设备的推送 ---------- */
@@ -872,6 +906,8 @@ export function davErrText(reason) {
     network: '连不上服务器（检查地址、网络或防火墙）',
       timeout: '连接超时',
       off: '同步未开启',
+      empty: '云端还没有快照（先点「保存并连接」把本机数据推一份上去）',
+      error: '覆盖没有完成，请稍后重试',
       mergebad: '云端快照的记录没能完整合并进本地（可能是版本兼容问题），为防覆盖云端正本，这次没有写入。请把设置页的「诊断」结果发给开发者'
   };
   if (map[reason]) return map[reason];

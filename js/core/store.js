@@ -781,6 +781,23 @@ export async function saveSyncConf(conf) {
   await kvSet({ [SYNC_CONF_KEY]: conf });
 }
 
+/* 清除本机保存的网盘密码。
+   密码是明文存在 chrome.storage.local 的——扩展里没有可信的本地密钥可用，
+   「加密」只能把钥匙和锁放进同一个抽屉，是假安全。所以不假装加密，
+   但必须给一个立刻擦掉的出口：共用电脑、换网盘、怀疑泄露时用。
+   只清密码、模式归 off，URL/账号保留，重新输入密码即可恢复。 */
+export async function clearWebdavCreds() {
+  const conf = await loadSyncConf();
+  const d = conf.webdav || {};
+  const next = {
+    ...conf,
+    mode: 'off',
+    webdav: { url: d.url || '', username: d.username || '', password: '' }
+  };
+  await saveSyncConf(next);
+  return next;
+}
+
 /* ---------- RSS 条目缓存：只存本机，不参与浏览器同步 ---------- */
 const FEED_CACHE_KEY = 'monk.feedcache.v1';
 
