@@ -433,6 +433,46 @@ async function scanGroupIds() {
     .map(idFromGroupKey);
 }
 
+/* 判定 local 区的存储变更里，哪些不是本页自己写的。
+   chrome.storage.onChanged 对「写入者自己」也会触发（广播给所有扩展页面），
+   不过滤回声的话，本页每次保存都会引发一次无意义的重载。
+   判定依据就是写入缓存：值内容与最近一次落盘的 JSON 一致 → 自己写的回声。
+   删除事件（newValue 缺席）无法与缓存比对（缓存已随删除清掉），一律视为外部 ——
+   误判的代价只是一次幂等的重载，不会形成回环（重载本身不写存储）。
+   只认本引擎管理的键；feedcache 等旁路写入不在此列，不打扰页面。 */
+export function externalLocalKeys(changes) {
+  const ext = [];
+  for (const [key, ch] of Object.entries(changes || {})) {
+    const nv = ch?.newValue;
+    if (!nv) {
+      if (isEngineKey(key)) ext.push(key); // 删除：只有引擎的键才值得我们重载
+      continue;
+    }
+    const vj = JSON.stringify(nv.v);
+    if (key === GROUP_INDEX_KEY) {
+      if (JSON.stringify({ v: nv.v, d: nv.d }) !== lastGroupIdxJSON) ext.push(key);
+      continue;
+    }
+    if (key === SITE_TOMBS_KEY) {
+      if (vj !== lastSiteTombsJSON) ext.push(key);
+      continue;
+    }
+    if (key.startsWith(GROUP_PREFIX)) {
+      if (vj !== lastGroupJSON[idFromGroupKey(key)]) ext.push(key);
+      continue;
+    }
+    const s = SIMPLE_SECTIONS.find((name) => sectionKey(name) === key);
+    if (s && vj !== lastJSON[s]) ext.push(key);
+  }
+  return ext;
+}
+
+const isEngineKey = (key) =>
+  key === GROUP_INDEX_KEY ||
+  key === SITE_TOMBS_KEY ||
+  key.startsWith(GROUP_PREFIX) ||
+  SIMPLE_SECTIONS.some((name) => sectionKey(name) === key);
+
 // 读全部本地记录 { 'monk.settings.v1': {v,updatedAt}, 'monk.group.<id>.v1': {...}, ... }
 export async function loadUnits() {
   const got = await kvGet([...SIMPLE_SECTIONS.map(sectionKey), GROUP_INDEX_KEY, SITE_TOMBS_KEY]);

@@ -6,7 +6,7 @@ export const VERSION =
     : '1.0.0';
 import { loadData } from './core/store.js';
 import { state, persist } from './core/state.js';
-import { initSync, onSyncRemote } from './core/sync.js';
+import { initSync, onSyncRemote, backgroundPull } from './core/sync.js';
 import { $, $$, toast } from './core/utils.js';
 
 import { renderEngines, bindSearch, hideSuggest } from './features/search.js';
@@ -89,7 +89,10 @@ async function init() {
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) fxStop();
-    else fxSync();
+    else {
+      fxSync();
+      backgroundPull(); // WebDAV 模式：切回前台顺手拉一次云端（内部 10 分钟节流），拉到更新走 onSyncRemote 同一条重渲染路径
+    }
   });
 
   fxSync();

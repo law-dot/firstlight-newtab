@@ -24,6 +24,7 @@ import {
   GROUP_INDEX_KEY,
   GROUP_PREFIX,
   SITE_TOMBS_KEY,
+  externalLocalKeys,
   loadUnits,
   saveUnit,
   removeUnit,
@@ -98,6 +99,7 @@ export async function initSync() {
     await saveSyncConf(conf);
   }
   unwatchRemote();
+  watchLocal(); // 本机其他窗口的变更通知：所有模式都需要（哪怕同步关闭）
   if (conf.mode === 'browser' && hasSync) {
     const pulled = await initialMerge();
     watchRemote();
@@ -291,6 +293,10 @@ async function pushPending() {
       pushTimer = setTimeout(pushPending, Math.min(60000, PUSH_DEBOUNCE * 2 ** pushRetry));
     } else {
       pushRetry = 0;
+      // 往返里若从云端拉到了其他设备的更新，别把 pulled 丢掉：
+      // 这里是「后台保存顺带同步」的路径，拉到的数据必须驱动一次重渲染，
+      // 否则 UI 一直停留在旧数据上（1.3.5~1.3.8 的实际缺口）。
+      if (r.pulled && remoteListener) remoteListener();
     }
     return;
   }
@@ -398,6 +404,35 @@ function unwatchRemote() {
     chrome.storage.onChanged.removeListener(onStorageChange);
   } catch {
     /* 忽略 */
+  }
+}
+
+/* ---------- 本机其他窗口的变更（1.3.9 新鲜度链路） ----------
+   两个新标签页同时开着时，B 页内存里的数据是旧的：B 随手编辑一下，
+   persist 会把旧分组状态带上**新时间戳**写回，LWW 合并时盖掉 A 页
+   （甚至另一台设备同步来的）新改动——旧数据伪装成新数据，墓碑救不了。
+   修法：监听 local 区广播，经 externalLocalKeys 过滤掉自己的回声后，
+   防抖重载 + 重渲染。重载是幂等的，误判只多渲染一次，不会成环。 */
+let localTimer = null;
+function onLocalChange(changes, area) {
+  if (area !== 'local') return;
+  const ext = externalLocalKeys(changes);
+  if (!ext.length) return;
+  clearTimeout(localTimer);
+  localTimer = setTimeout(() => {
+    if (remoteListener) remoteListener();
+  }, 250);
+}
+function watchLocal() {
+  if (hasSync) chrome.storage.onChanged.addListener(onLocalChange);
+}
+function unwatchLocal() {
+  if (hasSync) {
+    try {
+      chrome.storage.onChanged.removeListener(onLocalChange);
+    } catch {
+      /* 忽略 */
+    }
   }
 }
 
@@ -697,6 +732,32 @@ function webdavRound() {
     });
   }
   return davRoundPromise;
+}
+
+/* 切回前台时的「顺手拉一次」（1.3.9 新鲜度链路的跨设备入口）。
+   只在 WebDAV 模式有意义：browser 模式 storage.sync 自带推送通道。
+   节流：10 分钟内存变量，扩展重启即重置——启动时 initSync 反正会拉一次。
+   拉取挂在 davRoundPromise 单飞锁上，与手动同步/推送天然互斥。
+   失败也计入节流：离线时反复切窗口不该反复打网盘。 */
+const PULL_THROTTLE = 10 * 60 * 1000;
+let lastAutoPullAt = 0;
+let autoPullTimer = null;
+
+export function backgroundPull() {
+  if (!hasSync || conf.mode !== 'webdav') return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+  const now = Date.now();
+  if (now - lastAutoPullAt < PULL_THROTTLE) return;
+  lastAutoPullAt = now;
+  clearTimeout(autoPullTimer);
+  autoPullTimer = setTimeout(async () => {
+    try {
+      const r = await webdavRound();
+      if (r.ok && r.pulled && remoteListener) remoteListener();
+    } catch (err) {
+      console.warn('background pull failed', err);
+    }
+  }, 400);
 }
 
 async function davRoundInner() {
