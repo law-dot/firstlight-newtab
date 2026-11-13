@@ -33,9 +33,27 @@ import {
   saveSyncConf
 } from './store.js';
 import { toast } from './utils.js';
+import { compareVer } from './update.js';
 
 const hasSync =
   typeof chrome !== 'undefined' && !!(chrome.storage && chrome.storage.sync);
+
+/* 本机版本：只用来给快照打标记，不从 app.js 引（那会绕成循环依赖）。
+   自检页里没有扩展上下文，用 __FIRSTLIGHT_VERSION__ 顶一下。 */
+function appVersion() {
+  try {
+    if (globalThis.__FIRSTLIGHT_VERSION__) return String(globalThis.__FIRSTLIGHT_VERSION__);
+    return (chrome.runtime?.getManifest?.().version) || '';
+  } catch {
+    return '';
+  }
+}
+
+/* 从这个版本起，快照里会带 appVer / caps，也能识别 sitetombs。
+   低于它的设备是全量推送型（旧版 loadUnits 的白名单里没有 sitetombs），
+   它推一次就会把卡片删除记录抹掉 —— 这层只能告警，拦不住对面。 */
+const CAPS_VER = '1.4.0';
+const CAPS = ['sitetombs', 'groupidx', 'davbak'];
 
 // storage.sync 限额：单项 8KB / 总量 100KB / 写频率 120 次每分钟。
 // 单项按 7.6KB 预警线检查（含键名），超限跳过并提示。
@@ -745,7 +763,10 @@ async function davProbe(dconf) {
     const probeErr = `http ${res.status}`;
     // 降级：直接测真实快照路径
     const got = await davGet(dconf, { force: true });
-    const body = got.snapshot || { app: 'firstlight', ver: 1, savedAt: 0, deviceId: '', records: {} };
+    const body = got.snapshot || {
+      app: 'firstlight', ver: 1, appVer: appVersion(), caps: CAPS,
+      savedAt: 0, deviceId: '', records: {}
+    };
     const put = await davPut(dconf, body);
     if (put.ok) return { ok: true, viaSnapshot: true, probeBlocked: probeErr };
     return { ok: false, error: put.error || probeErr, status: put.status, probeStatus: status };
@@ -794,6 +815,10 @@ export function backgroundPull() {
   }, 400);
 }
 
+/* 最近一次看到的「对面是什么版本」。null = 没读过快照。
+   设置页用它提示「有台设备在用旧版，可能抹掉卡片删除记录」。 */
+export let lastDavPeer = null;
+
 async function davRoundInner() {
   const dconf = conf.webdav;
   if (!hasCred(dconf)) {
@@ -805,6 +830,29 @@ async function davRoundInner() {
     lastDavCheck = { ok: false, error: got.error, at: Date.now() };
     return { ok: false, reason: got.error };
   }
+
+  const mine = appVersion();
+  const cloudVer = String(got.snapshot?.appVer || '');
+  const cloudCaps = Array.isArray(got.snapshot?.caps) ? got.snapshot.caps.map(String) : [];
+
+  /* 版本不对称的三档，先判再合并：
+     ① 云端由比本机更新的版本写过 → 拒绝写。全量 PUT 是覆盖式的，
+        旧代码不认识新字段，写一次就把新版的数据降级了。
+     ② 云端没有 appVer（1.4.0 之前的版本写的）→ 它能读我们的，但我们
+        推上去的 sitetombs 它读不懂、下次全量推送会抹掉。只能告警。
+     ③ 两边都够新 → 正常。 */
+  if (got.snapshot && cloudVer && compareVer(cloudVer, mine) > 0) {
+    lastDavPeer = { ver: cloudVer, caps: cloudCaps, legacy: false, newer: true };
+    lastDavCheck = { ok: false, error: 'newercloud', at: Date.now() };
+    return { ok: false, reason: 'newercloud', cloudVer };
+  }
+  if (got.snapshot) {
+    const legacy = !cloudVer || compareVer(cloudVer, CAPS_VER) < 0;
+    lastDavPeer = { ver: cloudVer || '未知（1.4.0 之前）', caps: cloudCaps, legacy, newer: false };
+  } else {
+    lastDavPeer = null;
+  }
+
   let pulled = false;
   if (got.snapshot) {
     const res = await pullMerge(got.snapshot.records || {});
@@ -815,6 +863,8 @@ async function davRoundInner() {
   const payload = {
     app: 'firstlight',
     ver: 1,
+    appVer: mine,
+    caps: CAPS,
     savedAt: Date.now(),
     deviceId: conf.deviceId || '',
     records: units
@@ -906,6 +956,7 @@ export function davErrText(reason) {
     network: '连不上服务器（检查地址、网络或防火墙）',
       timeout: '连接超时',
       off: '同步未开启',
+      newercloud: '云端快照由更新版本的初见写入。为避免把新版数据降级覆盖，这次没有上传 —— 请先把本机升级到最新版再同步',
       empty: '云端还没有快照（先点「保存并连接」把本机数据推一份上去）',
       error: '覆盖没有完成，请稍后重试',
       mergebad: '云端快照的记录没能完整合并进本地（可能是版本兼容问题），为防覆盖云端正本，这次没有写入。请把设置页的「诊断」结果发给开发者'
@@ -1063,6 +1114,15 @@ export async function getSyncStatus() {
       remote: got.snapshot ? summarizeUnits(got.snapshot.records || {}) : null,
       remoteSavedAt: got.snapshot?.savedAt || 0,
       remoteDeviceId: got.snapshot?.deviceId || '',
+      // 云端版本：没有 appVer 就是 1.4.0 之前写的（读得懂我们，但会抹掉 sitetombs）
+      peer: got.snapshot
+        ? {
+            ver: got.snapshot.appVer || '',
+            legacy: !got.snapshot.appVer || compareVer(got.snapshot.appVer, CAPS_VER) < 0,
+            newer: !!got.snapshot.appVer && compareVer(got.snapshot.appVer, appVersion()) > 0,
+            caps: Array.isArray(got.snapshot.caps) ? got.snapshot.caps.map(String) : []
+          }
+        : null,
       error: got.error
     };
   }

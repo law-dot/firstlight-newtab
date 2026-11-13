@@ -388,6 +388,15 @@
       <ul class="feed-list" id="feedList"></ul>
       <p class="hint">支持 Google 日历、Apple 日历、Outlook 等导出的 ICS 订阅链接。每天自动刷新。</p>
     </section>
+
+    <section class="field about-field">
+      <label>关于</label>
+      <div class="about-row">
+        <span class="about-ver" id="aboutVer">v—</span>
+        <button class="btn small" id="btnCheckUpdate" type="button">检查更新</button>
+      </div>
+      <p class="hint about-update" id="aboutUpdate">数据只存本机 · 开源在 GitHub</p>
+    </section>
   </aside>
 
   <dialog class="dlg" id="siteDialog">
@@ -570,6 +579,7 @@
 
     </div>
     <div class="help-foot">
+      <button class="btn" id="btnHelpTour" type="button">看一遍动画引导</button>
       <button class="btn primary" id="btnHelpClose" type="button">开始使用</button>
     </div>
   </dialog>

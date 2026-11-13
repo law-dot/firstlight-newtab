@@ -25,7 +25,8 @@
     "https://api.open-meteo.com/*",
     "https://geocoding-api.open-meteo.com/*",
     "https://*.baidu.com/*",
-    "https://api.frankfurter.dev/*"
+    "https://api.frankfurter.dev/*",
+    "https://api.github.com/*"
   ],
   "optional_host_permissions": [
     "https://*/*",

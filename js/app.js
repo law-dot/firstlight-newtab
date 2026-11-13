@@ -30,8 +30,10 @@ import {
 import {
   applyTheme, syncSettingsUI, openDrawer, closeDrawer,
   bindSettings, bindDrawerAutoClose, bindEdgeSettings,
-  bindHelpDialog, openHelpDialog, bindFeedSettings, renderFeedList
+  bindHelpDialog, openHelpDialog, bindFeedSettings, renderFeedList,
+  bindAbout, checkUpdateOnStart
 } from './features/settings.js';
+import { startTour, shouldTour } from './features/onboarding.js';
 
 /* ================= 启动 ================= */
 init().catch((err) => {
@@ -107,6 +109,7 @@ function bind() {
   bindSettings();
   bindFeedSettings();
   bindHelpDialog(VERSION);
+  bindAbout(VERSION);
   bindWallpaper();
   bindWeather();
   bindPomodoro();
@@ -121,10 +124,13 @@ function bind() {
     syncAllFeeds(); // 首次打开新标签页尝试刷新一次（需要用户同意 optional_host_permissions）
   }
 
-  // 首次使用自动弹出说明（showOnboarding 默认 true，关掉后不再弹）
-  if (state.data.settings.showOnboarding) {
-    setTimeout(() => openHelpDialog(VERSION), 600);
+  // 首次使用：动画式分步引导（走完写 onboardedV，之后不再自动弹）。
+  // 详细说明仍在设置右上角的问号里，随时可看。
+  if (shouldTour(state.data.settings)) {
+    setTimeout(() => startTour(VERSION), 700);
   }
+  // 版本更新检查：等首屏稳定再发请求，失败静默（离线、被墙、限流都不打扰）
+  setTimeout(() => checkUpdateOnStart(VERSION), 6000);
 }
 
 /* 编辑模式开关 + 全局快捷键 + 待机时长选择 */

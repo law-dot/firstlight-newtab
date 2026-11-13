@@ -100,6 +100,9 @@ export function makeDefault() {
       dockMode: 'auto',
       dockBlocked: [],
       showOnboarding: true,
+      // 走完（或跳过）动画引导时记一笔当时的版本号；空 = 还没看过。
+      // 留版本号而不是 true：将来大改版可以按版本重新引导一次。
+      onboardedV: '',
       hotkeys: {},
       siteMode: 'detail',
       viewMode: 'standard', // 标准 / 极简：极简只隐藏收藏卡片区 #grid

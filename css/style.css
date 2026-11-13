@@ -2908,3 +2908,203 @@ body.idle-mode .ticker:not(.ticker-empty) { display: block; }
     0 6px 12px -2px var(--glow-strong),
     0 14px 28px 1px var(--glow);
 }
+
+/* ================= 首次使用引导（spotlight） ================= */
+/* 一层 div 挖洞 + 气泡。洞的遮罩靠 box-shadow 的巨大扩散做，不拼四块。
+   层级 50：压在抽屉(40)与各悬浮件之上，但低于 toast(60)。 */
+.tour {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  opacity: 0;
+  transition: opacity .22s ease;
+}
+.tour.on { opacity: 1; }
+
+.tour-hole {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-radius: 15px;
+  pointer-events: none;
+  opacity: 0;
+  /* 扩散圆角跟随 border-radius；内两层是描边与柔光 */
+  box-shadow:
+    0 0 0 9999px rgba(8, 10, 16, .66),
+    0 0 0 1.5px rgba(255, 255, 255, .55),
+    0 0 26px 6px rgba(124, 108, 246, .32);
+  transition:
+    left .42s cubic-bezier(.22, 1, .36, 1),
+    top .42s cubic-bezier(.22, 1, .36, 1),
+    width .42s cubic-bezier(.22, 1, .36, 1),
+    height .42s cubic-bezier(.22, 1, .36, 1),
+    opacity .2s ease;
+}
+
+.tour-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 344px;
+  max-width: calc(100vw - 32px);
+  padding: 16px 18px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: 16px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(26px) saturate(160%);
+  transform: translateZ(0);
+  transition:
+    left .42s cubic-bezier(.22, 1, .36, 1),
+    top .42s cubic-bezier(.22, 1, .36, 1);
+}
+/* 气泡尖角：只做一个小三角，跟着上下位置切换有点麻烦，这里用顶部细高光带替代 */
+.tour-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .28), transparent);
+  border-radius: 16px 16px 0 0;
+}
+.tour-card.center { width: 380px; }
+
+.tour-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.tour-idx {
+  font-size: 11px;
+  letter-spacing: .06em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.tour-dots { display: flex; gap: 5px; }
+.tour-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .22);
+  transition: background .2s ease, width .2s ease;
+}
+html[data-theme="light"] .tour-dots i { background: rgba(0, 0, 0, .16); }
+.tour-dots i.past { background: rgba(255, 255, 255, .5); }
+html[data-theme="light"] .tour-dots i.past { background: rgba(0, 0, 0, .38); }
+.tour-dots i.on {
+  width: 14px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.tour-title {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: .01em;
+}
+.tour-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.68;
+  color: var(--muted);
+}
+.tour-desc kbd {
+  padding: 1px 5px;
+  white-space: nowrap;
+  border: 1px solid var(--stroke);
+  border-radius: 5px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+}
+.tour-right { display: flex; gap: 8px; }
+.tour-skip {
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color .16s ease;
+}
+.tour-skip:hover { color: var(--text); }
+.tour-card .btn { min-width: 74px; }
+.tour-card .btn[disabled] { opacity: .38; cursor: default; }
+.tour-card .btn[disabled]:hover { box-shadow: none; }
+
+/* 换步：文案短促上浮，位置本身靠 left/top 过渡连续移动 */
+@keyframes tourSwap {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
+.tour-card.swap .tour-body { animation: tourSwap .24s cubic-bezier(.22, 1, .36, 1) both; }
+.tour-card.swap .tour-actions { animation: tourSwap .24s .04s cubic-bezier(.22, 1, .36, 1) both; }
+
+/* 引导期间：页面元素不再吃 hover 光晕，避免视觉上和聚光灯抢注意力 */
+body.tour-on :is(.icon-btn, .weather, .clock, .date-btn, .tab, .card, .dock-item, .btn):hover {
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour,
+  .tour-hole,
+  .tour-card { transition-duration: .01ms; }
+  .tour-card.swap .tour-body,
+  .tour-card.swap .tour-actions { animation-duration: .01ms; }
+}
+
+/* ================= 关于 / 版本更新 ================= */
+.about-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.about-ver {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  letter-spacing: .02em;
+}
+.about-update {
+  margin-top: 8px;
+}
+.about-update.is-new { color: var(--text); }
+.update-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-soft);
+  padding-bottom: 1px;
+}
+.update-link:hover { border-bottom-color: var(--accent); }
+
+/* 齿轮右上角的更新红点：不挡图标，也不是那种会跳动的红点 */
+#btnSettings { position: relative; }
+#btnSettings.has-update::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff5c5c;
+  box-shadow: 0 0 0 2px rgba(18, 20, 26, .55);
+}
+
+.help-foot { gap: 8px; }

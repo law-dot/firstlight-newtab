@@ -21,6 +21,8 @@ import {
   addFeed, removeFeed, syncFeed, listFeeds, feedRuntime, defaultFeedName, ensureFeedPermission
 } from './calfeed.js';
 import { renderAll, HOTKEY_DEFS, normalizeHotkey, getHotkeys, displayHotkey, findHotkeyConflict, setHotkey, resetHotkey } from '../app.js';
+import { checkForUpdate, judge, relTime, getCached, RELEASES_URL } from '../core/update.js';
+import { startTour } from './onboarding.js';
 
 // 壁纸模糊的常规说明；壁纸是纯色/渐变时会被换成「拖了也没用」的提示
 const BLUR_HINT = '把壁纸整体揉虚一层，前景的文字和卡片会更突出；纯色、渐变壁纸本来就没什么细节，拖了也看不出差别。';
@@ -254,6 +256,17 @@ function formatSyncStatus(st) {
     else {
       lines.push(`快照时间：${t(st.remoteSavedAt)} · 来自设备 ${st.remoteDeviceId || '?'}`);
       if (st.remoteDeviceId && st.remoteDeviceId !== st.deviceId) lines.push('（云端比本机新过的部分会在同步时并进来）');
+      // 版本不对称：这是「新老混用」唯一能被看见的地方
+      if (st.peer?.newer) {
+        lines.push('');
+        lines.push(`⚠ 云端由 v${st.peer.ver} 写入，比本机新。`);
+        lines.push('  本机不会上传（否则会把新版数据降级覆盖）。请先升级本机版本再同步。');
+      } else if (st.peer?.legacy) {
+        lines.push('');
+        lines.push(`⚠ 云端快照来自旧版（${st.peer.ver ? `v${st.peer.ver}` : '1.4.0 之前，未带版本标记'}）。`);
+        lines.push('  它能读到新数据，但它的全量推送会抹掉「卡片删除记录」，点过的删除可能被复活。');
+        lines.push('  建议把那台设备也升到 1.4.0 以上；在那之前，尽量只在版本较新的那台删东西。');
+      }
     }
   } else {
     lines.push('模式：未开启同步');
@@ -483,6 +496,8 @@ export function openDrawer() {
   document.body.classList.add('drawer-open');
   $('#drawer').setAttribute('aria-hidden', 'false');
   renderFeedList(); // 每次打开抽屉刷新订阅列表状态
+  // 通知各分区重画（订阅列表之外的快捷键、版本状态都靠这个事件）
+  document.dispatchEvent(new CustomEvent('drawer:open'));
 }
 
 export function closeDrawer() {
@@ -824,6 +839,11 @@ export function openHelpDialog(version) {
 
 export function bindHelpDialog(version) {
   $('#btnHelp')?.addEventListener('click', () => openHelpDialog(version));
+  // 从说明里可以直接重看一遍动画引导（老用户想复习，或者第一次跳过了）
+  $('#btnHelpTour')?.addEventListener('click', () => {
+    $('#helpDialog')?.close();
+    setTimeout(() => startTour(version), 120);
+  });
   $('#btnHelpClose')?.addEventListener('click', () => {
     const dlg = $('#helpDialog');
     dlg?.close();
@@ -843,6 +863,93 @@ export function bindHelpDialog(version) {
       }
     }
   });
+}
+
+/* ================= 关于 / 版本更新 ================= */
+
+// 最近一次检测结果（相对本机版本翻译过）。null = 还没查过
+let updateInfo = null;
+
+function paintAbout(version) {
+  const verEl = $('#aboutVer');
+  if (verEl) verEl.textContent = `v${version}`;
+
+  // 有新版本时齿轮上点一个小红点：不弹窗、不打断，但看得见
+  const gear = $('#btnSettings');
+  if (gear) gear.classList.toggle('has-update', updateInfo?.status === 'new');
+
+  const line = $('#aboutUpdate');
+  if (!line) return;
+  line.textContent = '';
+  line.classList.toggle('is-new', updateInfo?.status === 'new');
+
+  if (!updateInfo) {
+    line.textContent = '数据只存本机 · 开源在 GitHub';
+    return;
+  }
+  const { status, latest, url, checkedAt } = updateInfo;
+  if (status === 'new') {
+    const a = document.createElement('a');
+    a.href = url || RELEASES_URL;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.className = 'update-link';
+    a.textContent = `有新版本 v${latest}，去下载 →`;
+    line.append(a);
+    return;
+  }
+  if (status === 'ahead') {
+    // 开发版比线上发布的新，这是正常状态，别吓人
+    line.textContent = `线上最新 v${latest}，本机是更新的开发版`;
+    return;
+  }
+  if (status === 'current') {
+    line.textContent = `已是最新${checkedAt ? ` · 检查于 ${relTime(checkedAt)}` : ''}`;
+    return;
+  }
+  line.textContent = '暂时连不上 GitHub，稍后再试';
+}
+
+async function runUpdateCheck(version, { force = false } = {}) {
+  const btn = $('#btnCheckUpdate');
+  if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+  let r;
+  try {
+    r = await checkForUpdate({ force });
+  } catch (err) {
+    r = { ok: false, error: String(err?.message || 'network') };
+  }
+  updateInfo = judge(version, r);
+  paintAbout(version);
+  if (btn) { btn.disabled = false; btn.textContent = '检查更新'; }
+  return { ...updateInfo, ok: !!r.ok };
+}
+
+export function checkUpdateOnStart(version) {
+  // 先把缓存结果画上去（上次查过就不该显示「正在检查」），再由 TTL 决定要不要发请求
+  getCached()
+    .then((c) => {
+      if (c?.latest) {
+        updateInfo = judge(version, { ...c, ok: true });
+        paintAbout(version);
+      }
+    })
+    .catch(() => {});
+  runUpdateCheck(version).catch(() => {});
+}
+
+export function bindAbout(version) {
+  paintAbout(version);
+  $('#btnCheckUpdate')?.addEventListener('click', async () => {
+    if ($('#btnCheckUpdate')?.disabled) return;
+    const r = await runUpdateCheck(version, { force: true });
+    if (!r.ok) toast('检查失败：暂时连不上 GitHub', 3000);
+    else if (r.status === 'new') toast(`有新版本 v${r.latest}，升级前建议先导出备份`);
+    else if (r.status === 'ahead') toast('本机版本比线上发布的更新（开发版）', 3000);
+    else toast('已是最新版本');
+  });
+  // 抽屉首次渲染可能晚于启动检查，打开时补画一次
+  document.addEventListener('drawer:open', () => paintAbout(version));
 }
 
 /* ================= 抽屉自动收起 ================= */

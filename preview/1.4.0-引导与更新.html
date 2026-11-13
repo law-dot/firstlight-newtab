@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>1.4.0 引导与更新检测 · 自检</title>
+<!-- 必须引真实样式：引导层的定位/过渡全在 style.css 里。
+     不引的话 .tour 只是个 static div，测出来的坐标毫无意义。 -->
+<link rel="stylesheet" href="../css/style.css">
+<style>
+  /* 覆盖 newtab 的整屏布局，让这个页面还能当文档看 */
+  html, body { overflow: auto; height: auto; background: #fff; color: #16181d; }
+  body { font: 13px/1.7 -apple-system, sans-serif; margin: 24px; max-width: 820px; }
+  h1 { font-size: 16px; color: #16181d; }
+  pre { background: #f6f6f4; color: #16181d; border: 1px solid #ddd; padding: 14px; border-radius: 8px; white-space: pre-wrap; }
+  /* 给引导用的假骨架：看得见、有尺寸，但故意做得朴素 */
+  #fake { position: fixed; left: 12px; bottom: 12px; display: flex; gap: 10px; align-items: flex-end; z-index: 1; }
+  #fake > * { display: block; width: 84px; height: 34px; border: 1px dashed #bbb; background: #fff; border-radius: 6px; }
+  #fake #grid { width: 120px; height: 80px; }
+</style>
+</head>
+<body>
+<h1>1.4.0 引导与更新检测 · 自检</h1>
+<p>三块：引导的步进/跳过/状态落盘、版本号比较与 GitHub 检测解析、WebDAV 快照的版本不对称保护。
+快照那组要配本机故障模拟 WebDAV（<code>127.0.0.1:8766</code>）。</p>
+<div id="fake">
+  <input id="q" placeholder="搜索">
+  <button id="btnOpenSide" type="button">分组</button>
+  <div id="grid"></div>
+  <nav id="dock"></nav>
+  <button id="todoFab" type="button">待办</button>
+  <button id="btnSettings" type="button">设置</button>
+</div>
+<pre id="out">运行中…</pre>
+<script type="module">
+const out = [];
+const ok = (name, cond, extra = '') => out.push([!!cond, name, extra]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const BASE = 'http://127.0.0.1:8766/ok/';
+const CRED = { url: BASE, username: 'u@example.com', password: 'app-pass' };
+// 普通网页里没有 chrome.runtime.getManifest，给 sync.js 一个版本号顶上
+window.__FIRSTLIGHT_VERSION__ = '1.4.0';
+
+try {
+  const {
+    loadData, saveData, loadUnits, loadSyncConf, saveSyncConf, GROUP_INDEX_KEY
+  } = await import('../js/core/store.js');
+  const { syncNow, getSyncStatus, reloadSyncConf, resetDavCooldown } =
+    await import('../js/core/sync.js');
+  const { parseVer, compareVer, judge, checkForUpdate } =
+    await import('../js/core/update.js');
+  const { state } = await import('../js/core/state.js');
+  const tour = await import('../js/features/onboarding.js');
+
+  state.data = await loadData();
+
+  /* ================= A. 版本号 ================= */
+  ok('[A1] 解析常规版本', parseVer('v1.4.0')?.nums.join('.') === '1.4.0');
+  ok('[A2] 预发布低于正式', compareVer('1.4.0-beta', '1.4.0') === -1);
+  ok('[A3] 主版本大者胜', compareVer('1.10.0', '1.9.9') === 1, '1.10 应大于 1.9.9');
+  ok('[A4] 相同版本为 0', compareVer('1.4.0', 'v1.4.0') === 0);
+  ok('[A5] 认不出的版本不瞎猜', parseVer('nightly') === null && compareVer('nightly', '1.0.0') === 0);
+
+  ok('[A6] 线上更新 → new',
+     judge('1.4.0', { ok: true, latest: '1.5.0', url: 'u' }).status === 'new');
+  ok('[A7] 一样 → current',
+     judge('1.4.0', { ok: true, latest: '1.4.0', url: 'u' }).status === 'current');
+  ok('[A8] 本机更超前 → ahead（开发版常态）',
+     judge('1.4.0', { ok: true, latest: '1.3.5', url: 'u' }).status === 'ahead');
+
+  /* ================= B. 检测：mock 掉 GitHub ================= */
+  const realFetch = window.fetch;
+  let hits = 0;
+  window.fetch = async (url, init) => {
+    if (String(url).includes('api.github.com')) {
+      hits += 1;
+      return new Response(JSON.stringify({
+        tag_name: 'v1.9.2',
+        html_url: 'https://github.com/law-dot/firstlight-newtab/releases/tag/v1.9.2',
+        name: '1.9.2',
+        body: '修了一些东西',
+        published_at: '2026-11-01T00:00:00Z'
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  };
+  const up = await checkForUpdate({ force: true });
+  ok('[B1] 解析 tag 去掉 v 前缀', up.ok && up.latest === '1.9.2', up.latest || up.error);
+  ok('[B2] 带回了下载地址和更新说明', /releases\/tag/.test(up.url) && up.notes.length > 0);
+
+  const up2 = await checkForUpdate();
+  ok('[B3] 12 小时内第二次走缓存，不再打接口', up2.fromCache === true && hits === 1, `hits=${hits}`);
+
+  window.fetch = async () => { throw new Error('offline'); };
+  const bad = await checkForUpdate({ force: true });
+  ok('[B4] 断网时静默失败，不抛异常', bad.ok === false && bad.error === 'offline');
+  ok('[B5] 失败时保留上次的成功结果', bad.latest === '1.9.2', bad.latest || '(空)');
+  window.fetch = realFetch;
+
+  /* ================= C. 引导 ================= */
+  ok('[C1] 全新用户应看到引导', tour.shouldTour({}) === true);
+  ok('[C2] 记录过版本就不再自动弹', tour.shouldTour({ onboardedV: '1.4.0' }) === false);
+  ok('[C3] 手关过说明的不再打扰', tour.shouldTour({ showOnboarding: false }) === false);
+
+  // 从头来过：清掉上一轮可能写下的状态
+  delete state.data.settings.onboardedV;
+  state.data.settings.showOnboarding = true;
+
+  const p = tour.startTour('1.4.0');
+  await sleep(90);
+  const root = document.querySelector('.tour');
+  ok('[C4] 引导层挂到页面并淡入', !!root && !root.hidden && root.classList.contains('on'));
+  ok('[C5] 第一步停在搜索框', document.querySelector('.tour-idx').textContent === '1 / 7',
+     document.querySelector('.tour-idx').textContent);
+
+  // 洞口和气泡都是 420ms 过渡，等它走完再量，否则量到的是半路的位置
+  await sleep(520);
+  const qr = document.querySelector('#q').getBoundingClientRect();
+  const hr = document.querySelector('.tour-hole').getBoundingClientRect();
+  ok('[C6] 洞口套住了目标（外扩 8px）',
+     Math.abs(hr.left - (qr.left - 8)) < 14 && Math.abs(hr.top - (qr.top - 8)) < 14,
+     `hole=${Math.round(hr.left)},${Math.round(hr.top)} ${Math.round(hr.width)}x${Math.round(hr.height)} q=${Math.round(qr.left)},${Math.round(qr.top)} ih=${innerHeight} iw=${innerWidth} pos=${getComputedStyle(document.querySelector('#fake')).position} fakeTop=${Math.round(document.querySelector('#fake').getBoundingClientRect().top)}`);
+
+  const cardR = document.querySelector('.tour-card').getBoundingClientRect();
+  ok('[C7] 气泡不出屏（左右各留 16px）',
+     cardR.left >= 15 && cardR.right <= window.innerWidth - 15,
+     `${Math.round(cardR.left)}..${Math.round(cardR.right)} / ${window.innerWidth}`);
+
+  document.querySelector('[data-act="next"]').click();
+  await sleep(80);
+  ok('[C8] 下一步推进到 2 / 7', document.querySelector('.tour-idx').textContent === '2 / 7',
+     document.querySelector('.tour-idx').textContent);
+
+  document.querySelector('[data-act="prev"]').click();
+  await sleep(60);
+  ok('[C9] 上一步能回退', document.querySelector('.tour-idx').textContent === '1 / 7');
+
+  // 目标不可见时该跳过：藏掉第二步的目标，从第一步往后走
+  document.querySelector('#btnOpenSide').style.display = 'none';
+  document.querySelector('[data-act="next"]').click();
+  await sleep(80);
+  ok('[C10] 目标隐藏的步骤自动跳过，落到 3 / 7',
+     document.querySelector('.tour-idx').textContent === '3 / 7',
+     document.querySelector('.tour-idx').textContent);
+  document.querySelector('#btnOpenSide').style.display = '';
+
+  document.querySelector('[data-act="skip"]').click();
+  const why = await p;
+  await sleep(20);
+  ok('[C11] 跳过后结束并写明原因', why === 'skip', String(why));
+  ok('[C12] 跳过后记住了版本，不再自动弹',
+     state.data.settings.onboardedV === '1.4.0' && tour.shouldTour(state.data.settings) === false,
+     `onboardedV=${state.data.settings.onboardedV}`);
+
+  // 再走一遍，这次点到底，验证「完成」路径与按钮文案
+  state.data.settings.showOnboarding = true;
+  delete state.data.settings.onboardedV;
+  const p2 = tour.startTour('1.4.0');
+  await sleep(80);
+  for (let i = 0; i < 8; i += 1) {
+    const next = document.querySelector('[data-act="next"]');
+    if (!next) break;
+    next.click();
+    await sleep(45);
+  }
+  const done = await p2;
+  ok('[C13] 一路点到底走的是 done', done === 'done', String(done));
+  await sleep(280); // 收起动画 220ms
+  ok('[C14] 完成后引导层已收起', document.querySelector('.tour').hidden === true);
+  ok('[C15] 完成后状态落盘', state.data.settings.onboardedV === '1.4.0');
+
+  /* ================= D. 快照版本不对称 ================= */
+  await saveData(state.data);
+
+  // ① 云端由「未来版本」写入：应当拒写，且不能把云端盖掉
+  const future = {
+    app: 'firstlight', ver: 1, appVer: '9.9.9', caps: ['sitetombs'],
+    savedAt: Date.now(), deviceId: 'future', records: {}
+  };
+  await fetch(BASE + 'firstlight-sync.json', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(future)
+  });
+  const conf0 = await loadSyncConf();
+  await saveSyncConf({ ...conf0, mode: 'webdav', webdav: CRED, deviceId: 'me-test' });
+  await reloadSyncConf();
+  resetDavCooldown();
+
+  const r1 = await syncNow();
+  ok('[D1] 云端版本更高时拒绝上传', r1.ok === false && r1.reason === 'newercloud', JSON.stringify(r1));
+  const back1 = await (await fetch(BASE + 'firstlight-sync.json')).json();
+  ok('[D2] 云端快照原样未动（没被降级覆盖）', back1.appVer === '9.9.9' && back1.deviceId === 'future');
+
+  // ② 云端是旧版写的（没有 appVer）：能同步，但要能识别出对面是旧版
+  const units = await loadUnits();
+  const legacy = { app: 'firstlight', ver: 1, savedAt: Date.now(), deviceId: 'old-pc', records: units };
+  await fetch(BASE + 'firstlight-sync.json', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(legacy)
+  });
+  const st1 = await getSyncStatus();
+  ok('[D3] 旧版快照被标记为 legacy', st1.peer?.legacy === true, JSON.stringify(st1.peer || {}));
+  ok('[D4] 旧版快照的版本显示为「未知」', st1.peer?.ver === '');
+
+  resetDavCooldown();
+  const r2 = await syncNow();
+  ok('[D5] 旧版快照仍可正常同步（不拦用户）', r2.ok === true, JSON.stringify(r2));
+
+  const back2 = await (await fetch(BASE + 'firstlight-sync.json')).json();
+  ok('[D6] 推上去后云端带上了本机版本与能力表',
+     back2.appVer === '1.4.0' && Array.isArray(back2.caps) && back2.caps.includes('sitetombs'),
+     `${back2.appVer} / ${(back2.caps || []).join(',')}`);
+
+  const st2 = await getSyncStatus();
+  ok('[D7] 同步一轮后不再提示旧版', st2.peer?.legacy === false, JSON.stringify(st2.peer || {}));
+
+  // ③ 同版本：正常，不误报
+  const r3 = await syncNow();
+  ok('[D8] 两边同版本时正常往返', r3.ok === true);
+} catch (err) {
+  out.push([false, '脚本异常', String(err && err.stack || err)]);
+}
+
+const pass = out.filter(([c]) => c).length;
+const body = out
+  .map(([c, name, extra]) => `${c ? '✓' : '✗'} ${name}${extra ? `  — ${extra}` : ''}`)
+  .join('\n');
+document.getElementById('out').textContent =
+  `${body}\n\n${pass}/${out.length} 通过${pass === out.length ? ' ✓' : ''}`;
+window.__done = true;
+</script>
+</body>
+</html>
