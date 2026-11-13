@@ -113,11 +113,21 @@ export function bindSearch() {
     hideSuggest();
   });
 
-  $('#engineSelect').addEventListener('change', (e) => {
+  /* 引擎切换：搜索框旁的下拉和设置里的下拉是同一个设置项，必须绑同一个处理。
+     1.4.0 之前只绑了 #engineSelect，设置抽屉里的 #engineSetting 改了不生效
+     （用户 1.4.1 报的实际 bug：设置里选 Bing，搜索还是走旧引擎）。 */
+  const onEngineChange = (e) => {
     state.data.settings.engine = e.target.value;
     persist();
     syncSettingsUI();
     $('#q').focus();
+  };
+  $('#engineSelect').addEventListener('change', onEngineChange);
+  $('#engineSetting')?.addEventListener('change', (e) => {
+    onEngineChange(e);
+    // 抽屉里点完别把焦点抢到搜索框，否则刚选的项看不到
+    e.target.blur();
+    $('#q').blur();
   });
 }
 

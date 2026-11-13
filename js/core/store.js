@@ -358,6 +358,25 @@ const lastJSON = {};       // sectionName → JSON
 const lastGroupJSON = {};  // groupId → JSON
 let lastGroupIdxJSON = null;
 
+/* 本页「刚写过」的记录（key → 时间）。同步合并要用它挡住一类很烦的回滚：
+   用户刚换完壁纸/改完设置，几秒后一轮同步把云端那份**时间戳更新**的旧记录
+   拉回来，界面闪一下又变回原样。根因是另一端会把整段设置重写一遍
+   （1.4.0 的在线壁纸每次渲染都写 fetchedAt），时间戳永远比本机新。
+   这里的窗口只保护「本页刚刚的手动改动」，10 秒后照常按时间戳合并，
+   不影响正常的跨设备同步。 */
+const recentWrites = new Map();
+const RECENT_WRITE_MS = 10 * 1000;
+
+export function markLocalWrite(keys) {
+  const t = Date.now();
+  for (const k of keys || []) recentWrites.set(k, t);
+}
+
+export function isRecentLocalWrite(key, ms = RECENT_WRITE_MS) {
+  const t = recentWrites.get(key) || 0;
+  return Date.now() - t < ms;
+}
+
 // 分组墓碑 { id: 删除时间 }。没有它，「A 机删掉的分组」在 B 机上会永远复活；
 // 有了它，合并索引时可以确定「这个 id 是真被删了」而不是「对面还没收到」。
 let groupTombs = {};
@@ -769,6 +788,8 @@ export async function saveData(data, stamp = Date.now()) {
 
   if (Object.keys(writes).length) await kvSet(writes);
   if (removes.length) await kvRemove(removes);
+  // 本页手动改动记一笔，见 recentWrites 的注释（防同步把刚改的东西拉回旧值）
+  markLocalWrite(changed);
   return changed; // 变更的存储键，同步引擎据此决定推送范围
 }
 

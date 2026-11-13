@@ -5,7 +5,7 @@
 > 本地优先的浏览器新标签页。数据只存在你的浏览器里。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-5b45e0.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.4.0-1e63e9.svg)](manifest.json)
+[![Version](https://img.shields.io/badge/version-1.4.1-1e63e9.svg)](manifest.json)
 
 **初见**把你的新标签页变成一块安静的桌面：分组网站图标、搜索、壁纸、待办、番茄钟、天气、日历，以及一个能聚合多平台文章的 RSS 阅读器。
 

@@ -2917,9 +2917,15 @@ body.idle-mode .ticker:not(.ticker-empty) { display: block; }
   inset: 0;
   z-index: 50;
   opacity: 0;
+  /* 没进入引导时绝不能吃点击：这一层是「铺满整屏」的，
+     opacity:0 不代表不挡鼠标，一旦残留就会让设置抽屉里的按钮全部失灵。 */
+  pointer-events: none;
   transition: opacity .22s ease;
 }
-.tour.on { opacity: 1; }
+.tour.on { opacity: 1; pointer-events: auto; }
+/* 隐藏态的兜底：.tour 的类选择器优先级高于 UA 的 [hidden]{display:none}，
+   但这里没有写 display，所以还是显式声明一条，避免以后加 display 时踩坑 */
+.tour[hidden] { display: none; }
 
 .tour-hole {
   position: absolute;

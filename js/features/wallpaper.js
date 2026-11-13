@@ -255,6 +255,9 @@ export function buildSwatches() {
 }
 
 export function setWallpaper(wallpaper) {
+  // 用户明确换壁纸：清掉签名，让 applyWallpaper 一定重设一次
+  // （同一尺寸同格式的两张图签名会撞车，不清就等于「换了没反应」）
+  appliedSig = null;
   // 兜底带上 blur：调用点只关心自己那一项，不该顺手把模糊程度抹掉
   const prev = state.data.settings.wallpaper || {};
   state.data.settings.wallpaper = { ...wallpaper, blur: wallpaper.blur ?? prev.blur ?? 12 };
@@ -262,6 +265,12 @@ export function setWallpaper(wallpaper) {
   applyWallpaper();
   syncSettingsUI();
 }
+
+/* 已应用到页面上的壁纸签名。同一张图重复调用时不再动 DOM ——
+   以前每次都会 revoke 旧 blob、再 set 一个新的 objectURL，浏览器必须重新解码
+   整张图，中间有一瞬间背景是空的；同步回调 / 设置重绘只要多喊几次
+   applyWallpaper，页面就会一片一片地闪（1.4.1 报的「形状一直闪」正是这个）。 */
+let appliedSig = null;
 
 export async function applyWallpaper({ advanceOnline = false } = {}) {
   const wallpaper = state.data.settings.wallpaper;
@@ -271,33 +280,50 @@ export async function applyWallpaper({ advanceOnline = false } = {}) {
   // 模糊先落定：后面要取图 / 取在线壁纸，任何一步失败都不该顺带把模糊丢掉
   document.documentElement.style.setProperty('--bg-blur', `${wallpaper.blur ?? 12}px`);
 
-  if (state.bgUrl) {
-    URL.revokeObjectURL(state.bgUrl);
-    state.bgUrl = null;
-  }
+  // 真正换背景的唯一入口：签名没变就什么都不做（连 revoke 都不做）
+  const put = (sig, apply) => {
+    if (sig === appliedSig && bg.style.backgroundImage) return;
+    if (state.bgUrl) {
+      URL.revokeObjectURL(state.bgUrl);
+      state.bgUrl = null;
+    }
+    apply();
+    appliedSig = sig;
+  };
 
   if (wallpaper.type === 'image') {
     const blob = await getWallpaper();
     if (blob) {
-      state.bgUrl = URL.createObjectURL(blob);
-      bg.style.backgroundImage = `url("${state.bgUrl}")`;
-      bg.style.backgroundColor = '#12141a';
+      put(`image:${blob.size}:${blob.type}`, () => {
+        state.bgUrl = URL.createObjectURL(blob);
+        bg.style.backgroundImage = `url("${state.bgUrl}")`;
+        bg.style.backgroundColor = '#12141a';
+      });
     } else {
-      bg.style.backgroundImage = PRESETS[0].css;
+      put('image:none', () => {
+        bg.style.backgroundImage = PRESETS[0].css;
+      });
     }
   } else if (wallpaper.type === 'color') {
-    bg.style.backgroundImage = 'none';
-    bg.style.backgroundColor = wallpaper.value;
+    put(`color:${wallpaper.value}`, () => {
+      bg.style.backgroundImage = 'none';
+      bg.style.backgroundColor = wallpaper.value;
+    });
   } else if (wallpaper.type === 'online') {
     const item = await ensureOnline(wallpaper, advanceOnline);
     if (item) {
-      state.bgUrl = URL.createObjectURL(item.blob);
-      bg.style.backgroundImage = `url("${state.bgUrl}")`;
-      bg.style.backgroundColor = '#12141a';
       state.currentCredit = item.credit || '';
+      // 签名用图片地址：同一张图（每日图、未到轮播点）不会被反复重设
+      put(`online:${item.url || item.blob?.size || 'x'}`, () => {
+        state.bgUrl = URL.createObjectURL(item.blob);
+        bg.style.backgroundImage = `url("${state.bgUrl}")`;
+        bg.style.backgroundColor = '#12141a';
+      });
     } else {
-      bg.style.backgroundImage = PRESETS[0].css;
-      bg.style.backgroundColor = '#0b0e16';
+      put('online:none', () => {
+        bg.style.backgroundImage = PRESETS[0].css;
+        bg.style.backgroundColor = '#0b0e16';
+      });
       if (!state.onlineFailNotified) {
         state.onlineFailNotified = true;
         toast('在线壁纸获取失败，先用了内置渐变');
@@ -305,8 +331,10 @@ export async function applyWallpaper({ advanceOnline = false } = {}) {
     }
   } else {
     const preset = PRESETS.find((p) => p.id === wallpaper.value) || PRESETS[0];
-    bg.style.backgroundImage = preset.css;
-    bg.style.backgroundColor = '#0b0e16';
+    put(`preset:${preset.id}`, () => {
+      bg.style.backgroundImage = preset.css;
+      bg.style.backgroundColor = '#0b0e16';
+    });
   }
 
   // 固定遮罩由 CSS 控制（1.2.3 起不再可调），这里只负责把署名写上去
@@ -373,16 +401,26 @@ async function ensureOnline(wallpaper, advance) {
       }
       if (!blob) continue;
 
-      wallpaper.online = {
-        fetchedAt: Date.now(),
+      /* 只有真的变了才落盘。以前这里无条件 persist()，而 fetchedAt: Date.now()
+         每次都不同 —— 于是每开一个新标签页就写一次设置、触发一次同步推送
+         （WebDAV 下是整轮 GET+PUT），多窗口时还会来回互相触发重载。
+         命中缓存时沿用旧 fetchedAt，记录就稳定不变，一次都不写。 */
+      const next = {
+        fetchedAt: attempt.images ? (online.fetchedAt || Date.now()) : Date.now(),
         source: attempt.source?.id || attempt.source || online.source,
         sourceName: attempt.sourceName || attempt.source.name,
         images: list,
         cursor: rotate ? (i + 1) % list.length : i
       };
+      const changed = JSON.stringify(next) !== JSON.stringify(online);
+      wallpaper.online = next;
       if (!rotate && advance) state.manualIndex = (i + 1) % list.length;
-      persist();
-      pruneOnlineCache(list);
+      if (changed) {
+        persist();
+        pruneOnlineCache(list);
+      } else {
+        state.manualIndex = state.manualIndex || 0;
+      }
       return { ...image, blob };
     }
   }

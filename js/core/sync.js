@@ -25,6 +25,7 @@ import {
   GROUP_PREFIX,
   SITE_TOMBS_KEY,
   externalLocalKeys,
+  isRecentLocalWrite,
   loadUnits,
   saveUnit,
   removeUnit,
@@ -225,6 +226,11 @@ export async function pullMerge(remote) {
     const rt = r?.updatedAt || 0;
     const lt = l?.updatedAt || 0;
     if (r && r.v != null && rt > lt) {
+      /* 本页刚手动改过（换壁纸、改设置）就先按住不放：
+         另一端（尤其还开着新标签页的机器）会把整段设置连同旧值一起重写，
+         时间戳永远比这里新。不挡的话，用户刚换的壁纸会在几秒后被拉回旧的那张，
+         表现就是「闪一下又变回原来的」。窗口外的合并照常按时间戳走。 */
+      if (isRecentLocalWrite(key)) continue;
       await saveUnit(key, r);
       pulled = true;
     } else if (l && l.v != null && lt > rt) {
@@ -533,6 +539,7 @@ async function applyRemote(touched, changes) {
     const lt = local[key]?.updatedAt || 0;
     // 严格大于才拉回：自己推送的回声（updatedAt 相等）自然被跳过
     if ((rec.updatedAt || 0) > lt) {
+      if (isRecentLocalWrite(key)) continue; // 刚在本页改过，别被别人的旧值盖回（同 pullMerge）
       await saveUnit(key, rec);
       pulled = true;
     }

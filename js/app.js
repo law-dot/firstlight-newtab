@@ -50,9 +50,17 @@ async function init() {
     state.data = await loadData();
     state.activeGroupId = state.data.groups[0]?.id ?? null;
   }
-  // 其他设备推送更新时：重载数据并刷新界面
+  /* 其他设备推送更新时：重载数据并刷新界面。
+     1.4.1：加一道内容比对 —— 同步引擎的回声、我们自己刚写上去的推送，
+     都会走到这里。数据一模一样却重画一遍整页（连壁纸一起重设），
+     多窗口/多设备下就是肉眼可见的闪屏。内容没变直接跳过。 */
+  let dataSig = JSON.stringify(state.data);
   onSyncRemote(async () => {
-    state.data = await loadData();
+    const next = await loadData();
+    const sig = JSON.stringify(next);
+    state.data = next;
+    if (sig === dataSig) return;
+    dataSig = sig;
     renderAll();
     applyTheme();
     await applyWallpaper();

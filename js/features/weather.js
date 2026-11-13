@@ -132,12 +132,40 @@ export function bindWeather() {
     refreshWeather(true);
   });
 
-  $('#weatherCity').addEventListener('change', (e) => {
-    state.data.settings.weatherCity = e.target.value.trim();
+  /* 城市输入：change（失焦）和回车都要生效，并且给出可见反馈。
+     1.4.1 修的两处：
+     ① 只绑 change 时，在某些机型上回车/点抽屉别处不触发，用户以为「输了没反应」；
+     ② 拉了但失败时以前是静默的，界面停在旧数据上，看起来就是「不刷新」。 */
+  const cityInput = $('#weatherCity');
+  let cityBusy = false;
+  const applyCity = async () => {
+    const city = cityInput.value.trim();
+    if (city === (state.data.settings.weatherCity || '').trim() && state.data.settings.weather) {
+      refreshWeather(true); // 城市没变也允许手动催一次
+      return;
+    }
+    state.data.settings.weatherCity = city;
     state.data.settings.weather = null;  // 换城市清掉旧天气，强制立即重拉
     persist();
-    refreshWeather(true);
-  });
+    if (cityBusy) return;
+    cityBusy = true;
+    if (city) toast(`正在获取「${city}」的天气…`);
+    try {
+      await refreshWeather(true);
+      if (city && !state.data.settings.weather) toast('天气没取到：换个天气源或检查网络', 4500);
+    } finally {
+      cityBusy = false;
+    }
+  };
+  if (cityInput) {
+    cityInput.addEventListener('change', applyCity);
+    cityInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        cityInput.blur(); // blur 会触发 change，交给同一条路径
+      }
+    });
+  }
 
   const srcSel = $('#weatherSource');
   const customUrl = $('#customWeatherUrl');
@@ -325,7 +353,14 @@ export function renderWeather(w, stale) {
   const label = mapped?.[0] || w.desc || '—';
   const kind = mapped?.[1] || 'cloud';
 
-  $('#wxIcon').innerHTML = WX_ICONS[kind] || WX_ICONS.cloud;
+  // 图标只在天气类型真的变了才重画。syncSettingsUI 会跟着每次重渲染调到这里，
+  // 无条件 innerHTML 会让图标每次都重新解析、入场动画从头播一遍，
+  // 表现就是天气那个小图形一直在闪（1.4.1 修）。
+  const icon = $('#wxIcon');
+  if (icon.dataset.kind !== kind) {
+    icon.innerHTML = WX_ICONS[kind] || WX_ICONS.cloud;
+    icon.dataset.kind = kind;
+  }
   $('#wxTemp').textContent = `${Math.round(Number(w.temp))}°`;
   $('#wxDesc').textContent = label;
   $('#wxCity').textContent = w.city || '本地';
