@@ -596,11 +596,13 @@ export async function saveUnit(key, rec) {
   if (!key || !rec) return;
   await kvSet({ [key]: rec });
   cacheUnit(key, rec.v);
+  noteStamp(key, rec.updatedAt);
 }
 
 // 删除单条记录（索引裁掉分组后清理残留）
 export async function removeUnit(key) {
   await kvRemove([key]);
+  delete lastStamp[key];
   if (key.startsWith(GROUP_PREFIX)) delete lastGroupJSON[idFromGroupKey(key)];
   if (key === GROUP_INDEX_KEY) lastGroupIdxJSON = null;
 }
@@ -611,9 +613,29 @@ export async function removeUnits(keys) {
   if (!list.length) return 0;
   await kvRemove(list);
   for (const key of list) {
+    delete lastStamp[key];
     if (key.startsWith(GROUP_PREFIX)) delete lastGroupJSON[idFromGroupKey(key)];
   }
   return list.length;
+}
+
+// 判定本机是否「从未真正使用过」：所有参与同步的段要么缺失、要么还是
+// 首装落盘的那份默认值（updatedAt 为 0）。任何一次真实保存都会把 stamp
+// 换成当前时间，所以 updatedAt>0 就等于「用户动过」。
+// 同步用它决定首次合并的方向：初始 → 云端覆盖本地；使用中 → 必须问用户。
+const SYNCED_SECTIONS = ['settings', 'todos', 'dock', 'events', 'feeds', 'stats'];
+export async function isFreshLocal() {
+  const units = await loadUnits();
+  for (const s of SYNCED_SECTIONS) {
+    const rec = units[sectionKey(s)];
+    if (rec && (rec.updatedAt || 0) > 0) return false;
+  }
+  const idx = units[GROUP_INDEX_KEY];
+  if (idx && (idx.updatedAt || 0) > 0) return false;
+  for (const k of Object.keys(units)) {
+    if (k.startsWith(GROUP_PREFIX) && (units[k].updatedAt || 0) > 0) return false;
+  }
+  return true;
 }
 
 function groupsFromUnits(units) {
@@ -722,6 +744,7 @@ async function migrateGroups(legacyRec, data) {
 
 export async function loadData() {
   const units = await loadUnits();
+  stampsOf(units); // 记录乐观锁基准：这些是「本页已知」的最新状态
   groupTombs = prunedTombs(units[GROUP_INDEX_KEY]?.d || {});
   siteTombs = prunedTombs(units[SITE_TOMBS_KEY]?.v || {}, SITE_TOMB_MAX);
   lastSiteTombsJSON = JSON.stringify(siteTombs);
@@ -773,37 +796,64 @@ export async function loadData() {
 // stamp：本次落盘使用的时间戳。默认取当前时间；首次安装传 0，
 // 让远端已有数据在合并时永远胜出（见 loadData 的注释）。
 // 返回变更的**存储键**（可能是 monk.settings.v1，也可能是某条分组分片）。
-export async function saveData(data, stamp = Date.now()) {
+/* ---------- 落盘乐观锁（1.5.0 真机回滚事故的根治） ----------
+   persist 是「整段写入」：内存里只改一个字段（天气缓存到期、RSS 时间戳），
+   落盘时整段设置/收藏一起写。如果这一页的内存是陈旧的（另一台设备刚同步来
+   数据、或刚被「从云端覆盖」，本页还没重载完），这次写入会把新数据整体盖回
+   旧版，还带着**新时间戳** —— LWW 合并挡不住它，时间戳就是它伪造的。
+   1.5.0 Win 真机「覆盖后几分钟数据回到初始状态、云端跟着被污染」就是这条路径。
+   修法：写盘前重读这些键的当前 updatedAt；只要有一个比本页已知的基准新，
+   就判定「存储已被别人更新」—— 本次写入整体放弃（内存已陈旧，改了也白改），
+   广播 fl:store-conflict 让页面重载。要么全写、要么全不写：索引、分片、
+   墓碑必须一致，部分提交会造成「索引说有、本地没有」的中间态。
+   基准在 loadData / saveUnit / removeUnit / saveData 里维护（lastStamp）。 */
+const lastStamp = Object.create(null);
+
+function noteStamp(key, ts) {
+  lastStamp[key] = ts || 0;
+}
+
+export function stampsOf(units) {
+  for (const [k, rec] of Object.entries(units || {})) lastStamp[k] = rec?.updatedAt || 0;
+}
+
+async function findStaleKeys(keys) {
+  const stale = [];
+  if (!keys.length) return stale;
+  const cur = await kvGet(keys);
+  for (const k of keys) {
+    const c = cur[k];
+    if (c && (c.updatedAt || 0) > (lastStamp[k] ?? -1)) stale.push(k);
+  }
+  return stale;
+}
+
+// 把「diff 出变更计划」与「提交」拆开：冲突检查必须发生在任何缓存被污染之前，
+// 否则放弃写入时没法恢复基准，后续 diff 会一直误判「没变」。
+function buildSavePlan(data, stamp) {
+  const changed = [];
   const writes = {};
   const removes = [];
-  const changed = [];
+  const simpleUpdates = [];
+  const groupUpdates = [];
+  const groupDeletes = [];
+  const groupTombsAdd = {};
+  let siteTombsAdd = null;
+  let writeTombs = false;
+  let tombNext = null;
 
-  for (const s of SIMPLE_SECTIONS) {
-    const json = JSON.stringify(data[s]);
-    if (json === lastJSON[s]) continue; // 没变就不写，保持原 updatedAt
-    lastJSON[s] = json;
-    const key = sectionKey(s);
-    writes[key] = { v: data[s], updatedAt: stamp };
-    changed.push(key);
-  }
-
-  // 分组：逐条比对，只有变了的那个分组才写
   const ids = [];
   const prevGroupJSON = { ...lastGroupJSON }; // 旧内容快照，卡片墓碑靠它找出「被删的卡」
   for (const g of data.groups || []) {
     ids.push(g.id);
     const json = JSON.stringify(g);
     if (lastGroupJSON[g.id] === json) continue;
-    lastGroupJSON[g.id] = json;
-    const key = groupKey(g.id);
-    writes[key] = { v: g, updatedAt: stamp };
-    changed.push(key);
+    groupUpdates.push({ id: g.id, json, key: groupKey(g.id), v: g });
   }
   for (const id of Object.keys(lastGroupJSON)) {
     if (ids.includes(id)) continue;
-    delete lastGroupJSON[id];
-    removes.push(groupKey(id));
-    groupTombs[id] = stamp; // 立个墓碑：别的设备拉到新索引时才知道这是「删了」而不是「还没同步」
+    groupDeletes.push(id);
+    groupTombsAdd[id] = stamp; // 立个墓碑：别的设备拉到新索引时才知道这是「删了」
   }
 
   /* 卡片墓碑：id 消失了才算删，且要过两道排除 ——
@@ -830,30 +880,75 @@ export async function saveData(data, stamp = Date.now()) {
     }
   }
   if (gone.length) {
-    for (const sid of gone) siteTombs[sid] = Math.max(siteTombs[sid] || 0, stamp);
-    const tj = JSON.stringify(prunedTombs(siteTombs, SITE_TOMB_MAX));
+    siteTombsAdd = {};
+    for (const sid of gone) siteTombsAdd[sid] = Math.max(siteTombs[sid] || 0, stamp);
+    tombNext = prunedTombs({ ...siteTombs, ...siteTombsAdd }, SITE_TOMB_MAX);
+    const tj = JSON.stringify(tombNext);
     if (tj !== lastSiteTombsJSON) {
-      lastSiteTombsJSON = tj;
-      siteTombs = JSON.parse(tj);
-      writes[SITE_TOMBS_KEY] = { v: siteTombs, updatedAt: stamp };
+      writeTombs = true;
       changed.push(SITE_TOMBS_KEY);
+      writes[SITE_TOMBS_KEY] = { v: tombNext, updatedAt: stamp };
     }
   }
+  const gTombsNext = prunedTombs({ ...groupTombs, ...groupTombsAdd });
   const idxJSON = indexSignature(ids);
   if (lastGroupIdxJSON !== idxJSON) {
-    lastGroupIdxJSON = idxJSON;
-    writes[GROUP_INDEX_KEY] = { v: ids, d: prunedTombs(groupTombs), updatedAt: stamp };
     changed.push(GROUP_INDEX_KEY);
+    writes[GROUP_INDEX_KEY] = { v: ids, d: gTombsNext, updatedAt: stamp };
   }
+  for (const u of groupUpdates) {
+    changed.push(u.key);
+    writes[u.key] = { v: u.v, updatedAt: stamp };
+  }
+  for (const id of groupDeletes) removes.push(groupKey(id));
+  for (const s of SIMPLE_SECTIONS) {
+    const json = JSON.stringify(data[s]);
+    if (json === lastJSON[s]) continue; // 没变就不写，保持原 updatedAt
+    const key = sectionKey(s);
+    changed.push(key);
+    writes[key] = { v: data[s], updatedAt: stamp };
+    simpleUpdates.push({ s, json });
+  }
+  return { changed, writes, removes, simpleUpdates, groupUpdates, groupDeletes, groupTombsAdd, idxV: ids, writeTombs, tombNext };
+}
+
+function applySavePlan(p) {
+  for (const { s, json } of p.simpleUpdates) lastJSON[s] = json;
+  for (const u of p.groupUpdates) lastGroupJSON[u.id] = u.json;
+  for (const id of p.groupDeletes) delete lastGroupJSON[id];
+  Object.assign(groupTombs, p.groupTombsAdd);
+  if (p.writeTombs) {
+    siteTombs = p.tombNext;
+    lastSiteTombsJSON = JSON.stringify(p.tombNext);
+  }
+  if (p.changed.includes(GROUP_INDEX_KEY)) lastGroupIdxJSON = indexSignature(p.idxV);
+}
+
+export async function saveData(data, stamp = Date.now()) {
+  const plan = buildSavePlan(data, stamp);
+  if (!plan.changed.length && !plan.removes.length) return [];
+
+  // 乐观锁：见函数上方注释。冲突时放弃整个写入并请求重载。
+  const stale = await findStaleKeys(plan.changed);
+  if (stale.length) {
+    console.warn('saveData: 存储已被其他窗口/设备更新，放弃本次写入并请求重载', stale);
+    if (typeof document !== 'undefined') {
+      document.dispatchEvent(new CustomEvent('fl:store-conflict', { detail: { stale } }));
+    }
+    return [];
+  }
+
+  applySavePlan(plan);
 
   // 本页手动改动记一笔，见 recentWrites 的注释（防同步把刚改的东西拉回旧值）。
   // 必须在写盘之前记：写盘是异步的，写完再记的话，中间这几毫秒里恰好到达的
   // 一轮「远端覆盖」会认为本页没改过，把旧值写回来。
-  markLocalWrite(changed);
+  markLocalWrite(plan.changed);
 
-  if (Object.keys(writes).length) await kvSet(writes);
-  if (removes.length) await kvRemove(removes);
-  return changed; // 变更的存储键，同步引擎据此决定推送范围
+  for (const k of plan.changed) noteStamp(k, stamp);
+  if (Object.keys(plan.writes).length) await kvSet(plan.writes);
+  if (plan.removes.length) await kvRemove(plan.removes);
+  return plan.changed; // 变更的存储键，同步引擎据此决定推送范围
 }
 
 /* ---------- 弹窗收藏：待办队列（1.4.0） ----------

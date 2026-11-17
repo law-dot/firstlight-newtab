@@ -1,7 +1,7 @@
 // 搜索框 + 建议下拉（分组/收藏/历史/引擎）+ 简单计算 + 货币换算
 import { state, persist } from '../core/state.js';
 import {
-  $, $$, hostOf, faviconOf, hashHue, fetchWithTimeout
+  $, $$, hostOf, faviconOf, hashHue, fetchWithTimeout, toast
 } from '../core/utils.js';
 import { syncSettingsUI } from './settings.js';
 
@@ -17,13 +17,106 @@ const SUGGEST_MAX = 8;       // 每个 section 最多显示数
 const SUGGEST_FREQ = 0.6;    // 历史项里 visitCount 权重
 
 export function renderEngines() {
-  const options = ENGINES.map(
-    (e) => `<option value="${e.id}">${e.name}</option>`
-  ).join('');
-  $('#engineSelect').innerHTML = options;
-  $('#engineSetting').innerHTML = options;
-  $('#engineSelect').value = state.data.settings.engine;
-  $('#engineSetting').value = state.data.settings.engine;
+  // 隐藏的原生 select 只是数据载体（renderEngines / syncSettingsUI / 快捷键都读写它），
+  // 用户实际点的是 engineBtn + enginePop 自绘面板。
+  const sel = $('#engineSelect');
+  if (sel) {
+    sel.innerHTML = ENGINES.map(
+      (e) => `<option value="${e.id}">${e.name}</option>`
+    ).join('');
+    sel.value = state.data.settings.engine;
+  }
+  paintEngineUI();
+}
+
+/* 自绘引擎面板：按钮文字 + 选项列表。
+   面板开着时不重建列表（重建会让悬停行消失、面板闪一下——
+   与取色器 value 重置同类问题），只更新选中态。 */
+function paintEngineUI() {
+  const sel = $('#engineSelect');
+  const btn = $('#engineBtn');
+  if (btn && sel) {
+    btn.textContent = sel.selectedOptions[0]?.textContent || ENGINES[0].name;
+  }
+  const list = $('#engineList');
+  const pop = $('#enginePop');
+  if (!list || !pop) return;
+  if (pop.hidden) {
+    list.textContent = '';
+    for (const e of ENGINES) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'engine-item' + (e.id === state.data.settings.engine ? ' on' : '');
+      b.dataset.id = e.id;
+      b.textContent = e.name;
+      b.addEventListener('click', () => pickEngine(e.id));
+      list.appendChild(b);
+    }
+  } else {
+    for (const b of list.children) {
+      b.classList.toggle('on', b.dataset.id === state.data.settings.engine);
+    }
+  }
+}
+
+/* ---------- 引擎面板开合与选择 ---------- */
+export function enginePopOpen() {
+  return $('#enginePop') && !$('#enginePop').hidden;
+}
+
+/* Esc 的关闭走 app.js 的统一快捷键链（见 HOTKEY_DEFS 的 escape 分支），
+   这里只导出状态与动作；面板内输入行自己的 Esc 在元素上就地处理。 */
+function openEnginePop() {
+  $('#engineCustom').hidden = true; // 上次展开的地址输入行复位
+  paintEngineUI();                  // 此时面板还 hidden，列表会完整重建
+  $('#enginePop').hidden = false;
+  $('#engineBtn').setAttribute('aria-expanded', 'true');
+}
+
+export function closeEnginePop() {
+  if (!$('#enginePop')) return;
+  $('#enginePop').hidden = true;
+  $('#engineCustom').hidden = true;
+  $('#engineBtn')?.setAttribute('aria-expanded', 'false');
+}
+
+function pickEngine(id) {
+  if (id === 'custom') {
+    // 不关面板：就地展开自定义地址输入行，填完保存才生效
+    const inp = $('#engineCustomUrl');
+    $('#engineCustom').hidden = false;
+    inp.value = state.data.settings.customEngine || '';
+    inp.focus();
+    inp.select();
+    return;
+  }
+  setEngine(id);
+}
+
+function setEngine(id) {
+  state.data.settings.engine = id;
+  persist();
+  syncSettingsUI(); // 顺带显隐设置里的「自定义搜索地址」行
+  closeEnginePop();
+  $('#q').focus();
+}
+
+function saveCustomEngine() {
+  const url = $('#engineCustomUrl').value.trim();
+  if (!url) {
+    toast('填一下搜索地址，%s 会被替换成关键词');
+    return;
+  }
+  if (!/^https?:\/\/.+/i.test(url)) {
+    toast('地址要以 http(s):// 开头');
+    return;
+  }
+  if (!url.includes('%s')) {
+    toast('地址里要有 %s，搜索词才有地方放');
+    return;
+  }
+  state.data.settings.customEngine = url;
+  setEngine('custom');
 }
 
 export function buildEngineUrl(keyword) {
@@ -113,21 +206,34 @@ export function bindSearch() {
     hideSuggest();
   });
 
-  /* 引擎切换：搜索框旁的下拉和设置里的下拉是同一个设置项，必须绑同一个处理。
-     1.4.0 之前只绑了 #engineSelect，设置抽屉里的 #engineSetting 改了不生效
-     （用户 1.4.1 报的实际 bug：设置里选 Bing，搜索还是走旧引擎）。 */
-  const onEngineChange = (e) => {
-    state.data.settings.engine = e.target.value;
-    persist();
-    syncSettingsUI();
-    $('#q').focus();
-  };
-  $('#engineSelect').addEventListener('change', onEngineChange);
-  $('#engineSetting')?.addEventListener('change', (e) => {
-    onEngineChange(e);
-    // 抽屉里点完别把焦点抢到搜索框，否则刚选的项看不到
-    e.target.blur();
-    $('#q').blur();
+  /* 引擎下拉只在主界面（搜索框旁）。1.4.0 时设置抽屉里还有一个重复的下拉，
+     1.5.0 简化设置面板时移除了。1.5.0 后期再把原生 select 换成自绘面板：
+     ① 原生下拉弹层锚在毛玻璃（backdrop-filter）上，真机上闪跳反复；
+     ② 选「自定义」时原生下拉没法就地展开地址输入，只能干瞪眼。
+     隐藏的原生 select 保留作数据载体，不再接用户事件。 */
+  $('#engineBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (enginePopOpen()) closeEnginePop();
+    else openEnginePop();
+  });
+
+  // 点面板外面关闭（注意别和建议下拉的关闭逻辑打架：各自判各自的区域）
+  document.addEventListener('click', (e) => {
+    if (enginePopOpen() && !e.target.closest('#engineWrap')) closeEnginePop();
+  });
+
+  $('#engineCustomSave').addEventListener('click', saveCustomEngine);
+  $('#engineCustomCancel').addEventListener('click', closeEnginePop);
+  $('#engineCustomUrl').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault(); // 输入行在表单里，回车必须是保存而不是提交搜索
+      e.stopPropagation();
+      saveCustomEngine();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeEnginePop();
+    }
   });
 }
 

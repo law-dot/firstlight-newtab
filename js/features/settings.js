@@ -6,7 +6,8 @@ import {
   loadData, loadSyncConf, saveSyncConf, clearWebdavCreds
 } from '../core/store.js';
 import {
-  initSync, isSyncAvailable, overwriteLocalFromRemote,
+  initSync, isSyncAvailable, overwriteLocalFromRemote, overwriteRemoteFromLocal,
+  takeDirectionChoice, applySyncMode,
   syncNow, getSyncStatus, testWebdav, davErrText,
   reloadSyncConf, diagnoseWebdav
 } from '../core/sync.js';
@@ -17,9 +18,7 @@ import { applyDockMode, renderDock } from './dock.js';
 import { applySiteMode, applyLayout, renderGrid } from './sidebar.js';
 import { enableDescriptionsNow, bindDescNote } from './sitedesc.js';
 import { bindBookmarkImport } from './bookmarkimport.js';
-import {
-  addFeed, removeFeed, syncFeed, listFeeds, feedRuntime, defaultFeedName, ensureFeedPermission
-} from './calfeed.js';
+// 日历订阅管理已迁到 RSS 页（js/features/calui.js），设置面板只留核心偏好
 import { renderAll, HOTKEY_DEFS, normalizeHotkey, getHotkeys, displayHotkey, findHotkeyConflict, setHotkey, resetHotkey } from '../app.js';
 import { checkForUpdate, judge, relTime, getCached, RELEASES_URL } from '../core/update.js';
 import { startTour } from './onboarding.js';
@@ -80,6 +79,44 @@ function setAccent(hex) {
   renderAccentUI();
 }
 
+/* 取色器「正在用」标志。
+   1.5.0 真机反馈：点「自定义」后色板一闪就没了、颜色选不上。原因有两处，
+   都跟「色板是浏览器原生弹窗、锚在输入框上」有关：
+   ① 抽屉自动收起——色板开着，鼠标一移出抽屉，400ms 后抽屉滑走，
+      锚点飞出屏幕，浏览器直接把色板关掉，正在选的颜色作废；
+   ② 界面重画——同步/天气/壁纸任何一次 syncSettingsUI 都会把 picker.value
+      重设一遍，值一变，原生色板同样会关。
+   所以：色板开着期间既不收起抽屉、也不重置 value。change 为终点，
+   另设 60s 兜底防止标志卡住。 */
+let accentPicking = false;
+let accentPickSafety = 0;
+
+function markPicking(on) {
+  accentPicking = on;
+  clearTimeout(accentPickSafety);
+  if (on) {
+    accentPickSafety = setTimeout(() => {
+      accentPicking = false;
+    }, 60000);
+  }
+}
+
+export function isColorPicking() {
+  return accentPicking;
+}
+
+/* 取色器实时预览：拖动时原生色板只发 input，不发 change。
+   只看效果不落盘（每动一下都写 storage 太浪费），停手 240ms 再存。 */
+let accentSaveTimer = 0;
+function liveAccent(hex) {
+  state.data.settings.accent = hex;
+  applyAccent();
+  clearTimeout(accentSaveTimer);
+  accentSaveTimer = setTimeout(() => {
+    persist();
+  }, 240);
+}
+
 function renderAccentUI() {
   const box = $('#accentSwatches');
   if (!box) return;
@@ -94,7 +131,9 @@ function renderAccentUI() {
     b.addEventListener('click', () => setAccent(hex));
     box.appendChild(b);
   }
-  $('#accentPicker').value = cur;
+  // 色板开着时改成别的值 = 直接关掉原生色板，正在选的颜色全丢
+  const picker = $('#accentPicker');
+  if (picker && !accentPicking) picker.value = cur;
 }
 
 export function syncSettingsUI() {
@@ -106,9 +145,15 @@ export function syncSettingsUI() {
   $$('#themeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.val === s.theme));
   renderAccentUI();
   $('#engineSelect').value = s.engine;
-  $('#engineSetting').value = s.engine;
-  $('#customEngine').value = s.customEngine || '';
-  $('#customEngine').style.display = s.engine === 'custom' ? '' : 'none';
+  // 引擎按钮是自绘面板的触发器，文字要跟隐藏 select 的选中项一起刷
+  const engineBtn = $('#engineBtn');
+  const engineOpt = $('#engineSelect').selectedOptions[0];
+  if (engineBtn && engineOpt) engineBtn.textContent = engineOpt.textContent;
+  // 引擎下拉已从设置里移除（主界面搜索框旁就能换），只剩自定义地址这一行按需显隐
+  const ceField = $('#customEngineField');
+  if (ceField) ceField.hidden = s.engine !== 'custom';
+  const customEngine = $('#customEngine');
+  if (customEngine) customEngine.value = s.customEngine || '';
   $('#blurRange').value = String(blur);
   $('#blurRange').disabled = !canBlur;
   $('#blurVal').textContent = `${blur}px`;
@@ -128,7 +173,11 @@ export function syncSettingsUI() {
   $$('#fxSeg button').forEach((b) =>
     b.classList.toggle('on', b.dataset.val === (s.fxMode || 'always'))
   );
-  $('#colorWallpaper').value = s.wallpaper.type === 'color' ? s.wallpaper.value : '#1b2735';
+  // 壁纸取色器开着时不重置 value：改了值原生色板会直接关掉
+  const colorInput = $('#colorWallpaper');
+  if (colorInput && document.activeElement !== colorInput) {
+    colorInput.value = s.wallpaper.type === 'color' ? s.wallpaper.value : '#1b2735';
+  }
   if (document.activeElement !== $('#weatherCity')) {
     $('#weatherCity').value = s.weatherCity || '';
   }
@@ -182,16 +231,23 @@ function paintSyncUI() {
   );
   const hint = $('#syncHint');
   const pullBtn = $('#btnSyncPull');
+  const pushBtn = $('#btnSyncPush');
   const davForm = $('#webdavForm');
   const actions = $('#syncActions');
   const status = $('#syncStatus');
+  const autoRow = $('#syncAutoRow');
+  const autoToggle = $('#syncAutoToggle');
   if (pullBtn) pullBtn.hidden = syncConf.mode === 'off';
+  if (pushBtn) pushBtn.hidden = syncConf.mode === 'off';
+  if (autoRow) autoRow.hidden = syncConf.mode === 'off';
+  if (autoToggle) autoToggle.checked = syncConf.autoSync !== false;
   if (davForm) davForm.hidden = syncConf.mode !== 'webdav';
   if (actions) actions.hidden = syncConf.mode === 'off';
   if (status) {
     status.hidden = true;
     status.textContent = '';
   }
+  const manual = syncConf.autoSync === false;
   if (syncConf.mode === 'browser') {
     const last = syncConf.lastSyncAt
       ? `上次同步：${new Date(syncConf.lastSyncAt).toLocaleString('zh-CN', {
@@ -201,9 +257,11 @@ function paintSyncUI() {
           minute: '2-digit'
         })}。`
       : '';
-    hint.textContent = `经浏览器账号（Edge/Chrome）同步，数据会经过微软/谷歌服务器。${last}`;
+    hint.textContent = `经浏览器账号（Edge/Chrome）同步，数据会经过微软/谷歌服务器。${last}` +
+      (manual ? '当前为手动模式：只在点「立即同步」时与云端交换。' : '');
   } else if (syncConf.mode === 'webdav') {
-    hint.textContent = '经你自己的 WebDAV 网盘同步全量快照；打开新标签页时自动同步，也可点「立即同步」。';
+    hint.textContent = '经你自己的 WebDAV 网盘同步全量快照；打开新标签页时自动同步，也可点「立即同步」。' +
+      (manual ? '当前为手动模式：只在点「立即同步」时与网盘交换。' : '');
   } else {
     hint.textContent = '数据只保存在本机，不上传任何服务器。';
   }
@@ -230,10 +288,15 @@ function fmtSide(tag, s) {
 function formatSyncStatus(st) {
   const lines = [];
   const t = (ts) => (ts ? new Date(ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '从未');
+  /* 本机专属数据（稍后读、日历缓存、弹窗队列）按设计不上云，数量不该混进
+     「本机」那一行去和云端比，否则用户会以为云端少了一截。 */
+  const localOnlyNote = st.localOnly
+    ? [`（另有 ${st.localOnly} 条本机专属数据：稍后读、日历缓存等，按设计不同步）`]
+    : [];
   if (st.mode === 'browser') {
     lines.push(`模式：浏览器账号同步`, `扩展 ID：${st.extId || '（预览环境）'}`, `上次同步：${t(st.lastSyncAt)}`);
     lines.push('');
-    lines.push(fmtSide('本机', st.local));
+    lines.push(fmtSide('本机', st.local), ...localOnlyNote);
     lines.push(fmtSide('云端', st.remote));
     lines.push('');
     if (st.error) lines.push('⚠ 云端读取失败（未登录账号？）');
@@ -248,13 +311,17 @@ function formatSyncStatus(st) {
   } else if (st.mode === 'webdav') {
     lines.push(`模式：WebDAV`, `服务器：${st.url}`, `上次同步：${t(st.lastSyncAt)}`);
     lines.push('');
-    lines.push(fmtSide('本机', st.local));
+    lines.push(fmtSide('本机', st.local), ...localOnlyNote);
     lines.push(fmtSide('云端', st.remote));
     lines.push('');
     if (st.error) lines.push(`⚠ 云端读取失败：${davErrText(st.error)}`);
     else if (!st.remote) lines.push('云端还没有快照，保存并连接后会自动推上去。');
     else {
       lines.push(`快照时间：${t(st.remoteSavedAt)} · 来自设备 ${st.remoteDeviceId || '?'}`);
+      // 分文件格式：按数据域拆成 4 个文件 + 一份代际号总表，写入互不牵连
+      lines.push(st.peer?.split
+        ? '云端格式：分文件（设置/收藏/待办/订阅各一份，写入只覆盖对应那份）'
+        : '云端格式：旧版单快照，下次同步自动升级为分文件');
       if (st.remoteDeviceId && st.remoteDeviceId !== st.deviceId) lines.push('（云端比本机新过的部分会在同步时并进来）');
       // 版本不对称：这是「新老混用」唯一能被看见的地方
       if (st.peer?.newer) {
@@ -449,8 +516,26 @@ async function setSyncMode(mode) {
   syncConf = { ...syncConf, mode };
   await saveSyncConf(syncConf);
   const pulled = await initSync();
-  if (pulled) {
-    // 远端数据更新：重载并刷新界面
+  /* 首次开启同步且两边都有数据：同步引擎拒绝静默 LWW（新装机的初始数据
+     时间戳天然比云端新，盲合并且推上云端就是 1.5.0 真机事故），
+     这里把方向交给用户。confirm 的「确定/取消」对应「本机/云端」。 */
+  const choice = takeDirectionChoice();
+  if (choice) {
+    const useLocal = window.confirm(
+      `本机已有数据，云端也有 ${choice.cloudCount} 条记录，不能自动决定谁覆盖谁。\n\n` +
+        '「确定」= 用本机覆盖云端（云端数据会被替换）\n' +
+        '「取消」= 用云端覆盖本机（本机数据会被替换）\n\n' +
+        '以后随时可以在下方用两个「覆盖」按钮改方向。'
+    );
+    const res = useLocal ? await overwriteRemoteFromLocal() : await overwriteLocalFromRemote();
+    if (res.ok) {
+      toast(`已${useLocal ? '上传本机' : '恢复云端'} ${res.count} 项数据`);
+    } else {
+      toast('方向选择执行失败，可在设置里手动重试', 4500);
+    }
+  }
+  if (pulled || choice) {
+    // 远端数据更新或刚做了方向覆盖：重载并刷新界面
     state.data = await loadData();
     renderAll();
     applyTheme();
@@ -491,12 +576,33 @@ async function pullFromRemote() {
   toast(`已从${src}恢复 ${res.count} 项数据`);
 }
 
+/* 手动「以本地为准」：整包推上云端，不看时间戳。
+   用途：开启同步时选了「云端归本机管」，或云端被污染/回滚后，
+   用数据完好的这台机器把它顶回去（1.5.0 真机事故的恢复入口）。 */
+async function pushFromLocal() {
+  const viaDav = syncConf?.mode === 'webdav';
+  const yes = window.confirm(
+    '这会把本机的分组、待办、订阅源等全部内容推上云端，\n' +
+      '云端现有的数据会被覆盖，且无法撤销。确定继续吗？'
+  );
+  if (!yes) return;
+  toast(viaDav ? '正在上传快照到网盘…' : '正在推送到云端…');
+  const res = await overwriteRemoteFromLocal();
+  if (!res.ok) {
+    if (res.reason === 'off') toast('请先开启同步');
+    else toast(`推送失败：${davErrText(res.reason)}`, 4500);
+    return;
+  }
+  syncConf = await loadSyncConf();
+  paintSyncUI();
+  toast(`已把本机 ${res.count} 项数据推上云端`);
+}
+
 /* ================= 抽屉开关 ================= */
 export function openDrawer() {
   document.body.classList.add('drawer-open');
   $('#drawer').setAttribute('aria-hidden', 'false');
-  renderFeedList(); // 每次打开抽屉刷新订阅列表状态
-  // 通知各分区重画（订阅列表之外的快捷键、版本状态都靠这个事件）
+  // 通知各分区重画（快捷键、版本状态都靠这个事件）
   document.dispatchEvent(new CustomEvent('drawer:open'));
 }
 
@@ -573,13 +679,7 @@ export function bindSettings() {
     });
   });
 
-  $('#engineSetting').addEventListener('change', (e) => {
-    state.data.settings.engine = e.target.value;
-    persist();
-    syncSettingsUI();
-  });
-
-  $('#customEngine').addEventListener('change', (e) => {
+  $('#customEngine')?.addEventListener('change', (e) => {
     state.data.settings.customEngine = e.target.value.trim();
     persist();
     toast('自定义搜索已保存');
@@ -668,6 +768,14 @@ export function bindSettings() {
     btn.addEventListener('click', () => setSyncMode(btn.dataset.val));
   });
   $('#btnSyncPull')?.addEventListener('click', pullFromRemote);
+  $('#btnSyncPush')?.addEventListener('click', pushFromLocal);
+  $('#syncAutoToggle')?.addEventListener('change', async (e) => {
+    syncConf = { ...syncConf, autoSync: e.target.checked };
+    await saveSyncConf(syncConf);
+    await applySyncMode(); // 按新模式重挂监听、清残留定时器
+    paintSyncUI();
+    toast(e.target.checked ? '已开启自动同步' : '已切换为手动同步：只在点「立即同步」时与云端交换', 4500);
+  });
   $('#btnDavClear')?.addEventListener('click', clearDavCreds);
   $('#btnSyncNow')?.addEventListener('click', doSyncNow);
   $('#btnSyncStatus')?.addEventListener('click', refreshSyncStatus);
@@ -689,8 +797,26 @@ export function bindSettings() {
   });
 
   // 强调色：预设色块在 renderAccentUI 里逐个挂事件；这里只挂自定义取色器。
-  // 用 change 不用 input：拖动取色器会连发几十次，每次都写 storage 太浪费。
-  $('#accentPicker').addEventListener('change', (e) => setAccent(e.target.value));
+  // input = 拖动中实时预览（不落盘），change = 定稿落盘。
+  // 1.5.0 起两者都挂：只靠 change 的话，原生色板被意外关掉（抽屉滑走/重绘）
+  // 时 change 永不触发，用户看到的就是「颜色选不上」。
+  const accentPicker = $('#accentPicker');
+  accentPicker.addEventListener('pointerdown', () => markPicking(true));
+  accentPicker.addEventListener('focus', () => markPicking(true));
+  accentPicker.addEventListener('blur', () => {
+    // 有的平台色板一打开输入框就失焦，所以延迟确认，别把标志清早了
+    setTimeout(() => {
+      if (document.activeElement !== accentPicker) markPicking(false);
+    }, 1200);
+  });
+  accentPicker.addEventListener('input', (e) => liveAccent(e.target.value));
+  accentPicker.addEventListener('change', (e) => {
+    clearTimeout(accentSaveTimer);
+    markPicking(false);
+    setAccent(e.target.value);
+    // 选完主动失焦：否则输入框一直是 activeElement，抽屉会被一直钉住不收起
+    accentPicker.blur();
+  });
 
   bindDescNote();
   bindBookmarkImport();
@@ -979,7 +1105,13 @@ export function bindDrawerAutoClose() {
     if (!state.drawerHovered) return;
     if (document.querySelector('dialog[open]')) return;
     const active = document.activeElement;
-    if (active && active.tagName === 'SELECT' && drawer.contains(active)) return;
+    if (active && drawer.contains(active)) {
+      // 下拉、取色器都是「挂着原生弹层」的控件，抽屉一滑走弹层就没了
+      if (active.tagName === 'SELECT') return;
+      if (active.tagName === 'INPUT' && active.type === 'color') return;
+    }
+    // 取色器在用的整段时间都钉住抽屉（有的平台色板打开时输入框会失焦）
+    if (isColorPicking()) return;
     if (state.drawerLeaveTimer) return;
 
     state.drawerLeaveTimer = setTimeout(() => {
@@ -1010,88 +1142,3 @@ export function bindEdgeSettings() {
   });
 }
 
-/* ================= 日历订阅 ================= */
-
-export function renderFeedList() {
-  const list = $('#feedList');
-  if (!list) return;
-  list.textContent = '';
-  const feeds = listFeeds();
-  if (feeds.length === 0) {
-    const empty = document.createElement('li');
-    empty.className = 'feed-empty';
-    empty.textContent = '暂无订阅';
-    list.append(empty);
-    return;
-  }
-  for (const f of feeds) {
-    const li = document.createElement('li');
-    li.className = 'feed-item';
-
-    const rt = feedRuntime(f.id); // 同步时间 / 失败原因只存在本机，不在 feeds 里
-
-    const dot = document.createElement('i');
-    dot.className = 'feed-color';
-    dot.style.background = f.color || '#888';
-
-    const info = document.createElement('div');
-    info.className = 'feed-info';
-    const name = document.createElement('div');
-    name.className = 'feed-name';
-    name.textContent = f.title || defaultFeedName(f.url);
-    const url = document.createElement('div');
-    url.className = 'feed-url';
-    url.textContent = f.url;
-    const status = document.createElement('div');
-    status.className = 'feed-status';
-    if (rt.error) status.textContent = `❌ ${rt.error}`;
-    else if (rt.lastSync) status.textContent = `✓ ${new Date(rt.lastSync).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-    else status.textContent = '未同步';
-    info.append(name, url, status);
-
-    const syncBtn = document.createElement('button');
-    syncBtn.className = 'btn small';
-    syncBtn.type = 'button';
-    syncBtn.textContent = '刷新';
-    syncBtn.onclick = async () => {
-      toast('同步中…');
-      await syncFeed(f.id);
-      renderFeedList();
-      toast(feedRuntime(f.id).error ? '同步失败' : '已同步');
-    };
-
-    const delBtn = document.createElement('button');
-    delBtn.className = 'btn danger small';
-    delBtn.type = 'button';
-    delBtn.textContent = '删除';
-    delBtn.onclick = () => {
-      if (confirm(`删除订阅「${f.title || defaultFeedName(f.url)}」？`)) {
-        removeFeed(f.id);
-        renderFeedList();
-      }
-    };
-
-    li.append(dot, info, syncBtn, delBtn);
-    list.append(li);
-  }
-}
-
-export function bindFeedSettings() {
-  $('#btnAddFeed').addEventListener('click', async () => {
-    const url = $('#feedUrl').value.trim();
-    const name = $('#feedName').value.trim();
-    if (!url) { toast('请输入 ICS 地址'); return; }
-    // 先请求目标域名的访问权限（扩展环境；Web 预览直接过）
-    const ok = await ensureFeedPermission(url);
-    if (!ok) { toast('未授权访问该域名'); return; }
-    const result = addFeed({ url, name });
-    if (!result.ok) { toast(result.error); return; }
-    $('#feedUrl').value = '';
-    $('#feedName').value = '';
-    toast('已添加，正在同步…');
-    renderFeedList();
-  });
-  $('#feedUrl').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') $('#btnAddFeed').click();
-  });
-}

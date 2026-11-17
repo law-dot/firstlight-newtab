@@ -10,7 +10,7 @@ import { initSync, onSyncRemote, backgroundPull } from './core/sync.js';
 import { drainPendingAdds, drainPendingReads, watchPendingAdds } from './core/pending.js';
 import { $, $$, toast } from './core/utils.js';
 
-import { renderEngines, bindSearch, hideSuggest } from './features/search.js';
+import { renderEngines, bindSearch, hideSuggest, enginePopOpen, closeEnginePop } from './features/search.js';
 import {
   refreshWeather, checkWeatherRefresh, bindWeather,
   fx, fxSync, fxStop, fxSize, watchMotionPref
@@ -31,7 +31,7 @@ import {
 import {
   applyTheme, syncSettingsUI, openDrawer, closeDrawer,
   bindSettings, bindDrawerAutoClose, bindEdgeSettings,
-  bindHelpDialog, openHelpDialog, bindFeedSettings, renderFeedList,
+  bindHelpDialog, openHelpDialog,
   bindAbout, checkUpdateOnStart
 } from './features/settings.js';
 import { startTour, shouldTour } from './features/onboarding.js';
@@ -163,7 +163,6 @@ function bind() {
   bindDock();
   bindTodo();
   bindSettings();
-  bindFeedSettings();
   bindHelpDialog(VERSION);
   bindAbout(VERSION);
   bindWallpaper();
@@ -313,7 +312,7 @@ function bindGlobal() {
        v1.0 曾在 document 上又挂了一个，冒泡顺序 document 先于 window，
        导致下面这条优先级链从未生效，按一次 Esc 抽屉和弹窗会一起关。
      - 输入框里不拦截裸键（保留正常打字）
-     - Escape 优先级：搜索建议 → 对话框(最上层) → 抽屉 → 编辑模式 */
+     - Escape 优先级：搜索建议 → 引擎面板 → 对话框(最上层) → 抽屉 → 编辑模式 */
   window.addEventListener('keydown', (e) => {
     const tag = (e.target.tagName || '').toLowerCase();
     const inEditable =
@@ -338,10 +337,12 @@ function bindGlobal() {
     if (matched === 'escape') {
       // 1) 搜索建议优先关掉，避免连带关掉抽屉
       if (!$('#suggest').hidden) { hideSuggest(); return; }
-      // 2) 只关最上层那个对话框（DOM 顺序里最后一个即最上层的 modal）
+      // 2) 引擎自绘面板（原生 select 换掉的产物，优先级同「最上层浮层」）
+      if (enginePopOpen()) { closeEnginePop(); return; }
+      // 3) 只关最上层那个对话框（DOM 顺序里最后一个即最上层的 modal）
       const dialogs = $$('dialog[open]');
       if (dialogs.length) { dialogs[dialogs.length - 1].close(); return; }
-      // 3) 再关抽屉
+      // 4) 再关抽屉
       if (document.body.classList.contains('drawer-open')) { closeDrawer(); return; }
       // 4) 最后退编辑模式
       if (state.editMode) {

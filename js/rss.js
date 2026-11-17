@@ -6,6 +6,7 @@ import { initSync } from './core/sync.js';
 import { $, toast, escapeHtml } from './core/utils.js';
 import { refreshFeeds, aggregate } from './features/feed.js';
 import { hasFetchAccess, requestFetchAccess } from './core/permissions.js';
+import { bindCalUI } from './features/calui.js';
 
 let cache = {};
 let filter = 'all';
@@ -59,6 +60,7 @@ function bind() {
   });
   $('#feedForm').onsubmit = onAddFeed;
   $('#chips').onclick = onChipClick;
+  bindCalUI(); // 日历订阅弹窗（ICS 与 RSS 共页不共通道）
 }
 
 async function onAddFeed(e) {

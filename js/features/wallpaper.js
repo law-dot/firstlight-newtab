@@ -210,12 +210,28 @@ export function bindWallpaper() {
     }
   });
 
+  // 纯色壁纸：input = 拖动中实时预览，change = 定稿落盘。
+  // 与强调色取色器同理——只挂 change 的话，色板被意外关掉（抽屉自动收起、
+  // 界面重绘）就再也收不到值，表现为「颜色选不上」。
+  let colorRaf = 0;
+  let colorSaveTimer = 0;
+  $('#colorWallpaper').addEventListener('input', (e) => {
+    const v = e.target.value;
+    state.data.settings.wallpaper.type = 'color';
+    state.data.settings.wallpaper.value = v;
+    cancelAnimationFrame(colorRaf);
+    colorRaf = requestAnimationFrame(() => applyWallpaper());
+    clearTimeout(colorSaveTimer);
+    colorSaveTimer = setTimeout(() => persist(), 240);
+  });
   $('#colorWallpaper').addEventListener('change', (e) => {
+    clearTimeout(colorSaveTimer);
     setWallpaper({
       type: 'color',
       value: e.target.value,
       blur: state.data.settings.wallpaper.blur ?? 12
     });
+    e.target.blur(); // 同上：别让取色器一直占着焦点把抽屉钉住
   });
 
   /* 壁纸模糊：滑杆直接改 CSS 变量，逐帧改全屏 blur 比较贵，用 rAF 合并到一帧一次 */

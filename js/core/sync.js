@@ -1,6 +1,6 @@
 // 同步引擎：本地优先，远程后端可插拔。
-// browser 后端 = chrome.storage.sync（Edge/Chrome 账号同步）；
-// webdav 后端 = 用户自己的 WebDAV 网盘（坚果云等），全量快照，见下方说明。
+// browser 后端 = chrome.storage.sync（Edge/Chrome 账号同步），逐记录读写；
+// webdav 后端 = 用户自己的 WebDAV 网盘（坚果云等），分文件快照，见下方说明。
 // 同步配置只存本机（store.js 的 loadSyncConf），永不参与同步。
 //
 // 数据通路：store.js 的 loadUnits / saveUnit / removeUnit / removeUnits。
@@ -25,6 +25,7 @@ import {
   GROUP_PREFIX,
   SITE_TOMBS_KEY,
   externalLocalKeys,
+  isFreshLocal,
   isRecentLocalWrite,
   loadUnits,
   saveUnit,
@@ -38,6 +39,16 @@ import { compareVer, compareFamily } from './update.js';
 
 const hasSync =
   typeof chrome !== 'undefined' && !!(chrome.storage && chrome.storage.sync);
+
+// store.js 乐观锁的冲突广播：别的窗口/设备刚写过存储，本页内存已陈旧，
+// 立刻走重载（与 onLocalChange 同一条路径，幂等）。1.5.0 真机回滚事故的
+// 保险丝之一：没有它，陈旧内存的下一次 persist 就会赢回整段数据。
+if (typeof document !== 'undefined') {
+  document.addEventListener('fl:store-conflict', (e) => {
+    console.warn('sync: 检测到写入冲突，重载最新数据', e?.detail);
+    if (remoteListener) remoteListener();
+  });
+}
 
 const SETTINGS_KEY = 'monk.settings.v1';
 
@@ -70,7 +81,7 @@ function appVersion() {
    低于它的设备是全量推送型（旧版 loadUnits 的白名单里没有 sitetombs），
    它推一次就会把卡片删除记录抹掉 —— 这层只能告警，拦不住对面。 */
 const CAPS_VER = '1.4.0';
-const CAPS = ['sitetombs', 'groupidx', 'davbak'];
+const CAPS = ['sitetombs', 'groupidx', 'davbak', 'davsplit'];
 
 // storage.sync 限额：单项 8KB / 总量 100KB / 写频率 120 次每分钟。
 // 单项按 7.6KB 预警线检查（含键名），超限跳过并提示。
@@ -139,6 +150,13 @@ export async function initSync() {
     await saveSyncConf(conf);
   }
   unwatchRemote();
+  unwatchLocal();
+  if (isManual()) {
+    // 手动模式：启动不做任何同步，也不挂监听 —— 数据只在用户点「立即同步」
+    // 或「覆盖」时流动。这是 1.5.0 真机事故的直接回应：自动同步在
+    // 「新装机 + 多窗口」场景下会互相回写，宁可让用户多按一次按钮。
+    return false;
+  }
   watchLocal(); // 本机其他窗口的变更通知：所有模式都需要（哪怕同步关闭）
   if (conf.mode === 'browser' && hasSync) {
     const pulled = await initialMerge();
@@ -158,6 +176,11 @@ export async function initSync() {
   return false;
 }
 
+// autoSync 默认 true：老配置没有这个字段，行为与 1.4.x 一致
+export function isManual() {
+  return conf.mode !== 'off' && conf.mode != null && conf.autoSync === false;
+}
+
 // 设置页保存完 WebDAV 配置后必须调这个：否则本模块的 conf 还是上一次 initSync 读到的旧值
 // （典型症状：明明填对了账号密码，一点「保存并连接」就报「地址不合法」）
 export async function reloadSyncConf() {
@@ -165,11 +188,27 @@ export async function reloadSyncConf() {
   return conf;
 }
 
+// 自动/手动切换后调用：按新模式重挂监听、清掉残留定时器
+export async function applySyncMode() {
+  conf = await loadSyncConf();
+  unwatchRemote();
+  unwatchLocal();
+  clearTimeout(pushTimer);
+  clearTimeout(pullTimer);
+  clearTimeout(localTimer);
+  if (isManual()) return;
+  watchLocal();
+  if (conf.mode === 'browser' && hasSync) {
+    watchRemote();
+  }
+}
+
 // state.js persist() 保存成功后调用，参数是本次变更的存储键
 export function notifyChanged(changedUnits = []) {
   if ((conf.mode !== 'browser' && conf.mode !== 'webdav') || !hasSync) return;
   for (const k of changedUnits) if (isOurs(k)) pendingPush.add(k);
   if (!pendingPush.size) return;
+  if (isManual()) return; // 手动模式：只记账，等「立即同步」一起推
   clearTimeout(pushTimer);
   pushTimer = setTimeout(pushPending, PUSH_DEBOUNCE);
 }
@@ -230,15 +269,20 @@ async function reconcileGroups(indexRec, force = false) {
 }
 
 /* ---------- 远端记录并入本地（两个后端共用） ----------
+   relevant：可选的键集合（Set）。分文件同步下一次只拉了部分段，
+   传入它可把「没拉的段」从比较中剔除——否则本地较新的未拉段会被
+   误判成「需要推送」，白写一轮云端还虚抬代际号。
    返回 { pulled, toPush }：pulled = 本机有更新需要重载界面；
    toPush = 本机更新的记录，调用方决定往哪个后端推。 */
-export async function pullMerge(remote) {
+export async function pullMerge(remote, relevant = null) {
   const local = await loadUnits();
   let pulled = false;
   const toPush = {};
 
   const keys = new Set([...Object.keys(local), ...Object.keys(remote).filter(isOurs)]);
+  const consider = (key) => !relevant || relevant.has(key);
   for (const key of keys) {
+    if (!consider(key)) continue;
     if (!isOurs(key) || key === GROUP_INDEX_KEY || key === SITE_TOMBS_KEY) continue; // 索引与卡片墓碑单独处理
     const r = remote[key];
     const l = local[key];
@@ -270,32 +314,41 @@ export async function pullMerge(remote) {
   }
 
   /* 卡片墓碑：并集合并（见 mergeTombs 的注释）。放在分组合并之后，
-     这样刚拉回来的分组记录在下次 loadSections 时就会被墓碑过滤掉。 */
-  const ltombs = local[SITE_TOMBS_KEY] || null;
-  const rtombs = remote[SITE_TOMBS_KEY] || null;
-  if (ltombs || rtombs) {
-    const mergedT = mergeTombs(ltombs, rtombs);
-    if (sigOfTombs(ltombs) !== sigOfTombs(mergedT)) {
-      await saveUnit(SITE_TOMBS_KEY, mergedT);
-      pulled = true;
+     这样刚拉回来的分组记录在下次 loadSections 时就会被墓碑过滤掉。
+
+     只有本轮真拉过 sites 段才做这段。没拉过的段不能参与「谁有更新」的裁决：
+     远端一侧恒为 null，下面「远端 ≠ 合并结果」就永远成立，于是每轮都往
+     toPush 里塞一条索引/墓碑，target 因此多出 sites 段 —— 表现是「只改了个
+     待办，整个收藏段被重传一遍」。跨设备时两台机器互相触发，流量来回放大。 */
+  if (consider(SITE_TOMBS_KEY)) {
+    const ltombs = local[SITE_TOMBS_KEY] || null;
+    const rtombs = remote[SITE_TOMBS_KEY] || null;
+    if (ltombs || rtombs) {
+      const mergedT = mergeTombs(ltombs, rtombs);
+      if (sigOfTombs(ltombs) !== sigOfTombs(mergedT)) {
+        await saveUnit(SITE_TOMBS_KEY, mergedT);
+        pulled = true;
+      }
+      if (sigOfTombs(rtombs) !== sigOfTombs(mergedT)) toPush[SITE_TOMBS_KEY] = mergedT;
     }
-    if (sigOfTombs(rtombs) !== sigOfTombs(mergedT)) toPush[SITE_TOMBS_KEY] = mergedT;
   }
 
-  const li = local[GROUP_INDEX_KEY] || null;
-  const ri = remote[GROUP_INDEX_KEY] || null;
-  if (li || ri) {
-    const merged = mergeIndex(li, ri);
-    if (sigOf(li) !== sigOf(merged)) {
-      await saveUnit(GROUP_INDEX_KEY, merged);
-      pulled = true;
-    }
-    if (sigOf(ri) !== sigOf(merged)) toPush[GROUP_INDEX_KEY] = merged;
-    if (li && ri) {
-      await dropTombstoned(merged);
-      await reconcileGroups(merged);
-      // 判定为「已删除」的分组记录别再推上去，否则云端永远留着垃圾
-      for (const id of Object.keys(merged.d || {})) delete toPush[gkey(id)];
+  if (consider(GROUP_INDEX_KEY)) {
+    const li = local[GROUP_INDEX_KEY] || null;
+    const ri = remote[GROUP_INDEX_KEY] || null;
+    if (li || ri) {
+      const merged = mergeIndex(li, ri);
+      if (sigOf(li) !== sigOf(merged)) {
+        await saveUnit(GROUP_INDEX_KEY, merged);
+        pulled = true;
+      }
+      if (sigOf(ri) !== sigOf(merged)) toPush[GROUP_INDEX_KEY] = merged;
+      if (li && ri) {
+        await dropTombstoned(merged);
+        await reconcileGroups(merged);
+        // 判定为「已删除」的分组记录别再推上去，否则云端永远留着垃圾
+        for (const id of Object.keys(merged.d || {})) delete toPush[gkey(id)];
+      }
     }
   }
   return { pulled, toPush };
@@ -312,10 +365,36 @@ async function markMerged() {
   }
 }
 
+/* 1.5.0 起，首次合并（mergedOnce=false）不再盲用 LWW。
+   真机事故复盘：新装机哪怕只真实保存过一次（改壁纸、收藏一个网站），
+   本机记录的时间戳就比云端的新 —— initialMerge 会把这份接近初始的数据
+   推上云端，把另一台机器攒了几个星期的数据静默冲掉。
+   所以首次合并分三种情况：
+   ① 云端没数据 → 正常推本机（本来就是「注册」云端）；
+   ② 本机是初始状态（isFreshLocal）→ 云端直接覆盖本地，正是用户预期；
+   ③ 本机使用中 + 云端有数据 → **绝不静默合并**，把选择权交给设置页
+      （takeDirectionChoice），由用户决定哪边覆盖哪边。 */
+let pendingDirectionChoice = null;
+export function takeDirectionChoice() {
+  const c = pendingDirectionChoice;
+  pendingDirectionChoice = null;
+  return c;
+}
+
 async function initialMerge() {
   let pulled = false;
   try {
     const remote = await chrome.storage.sync.get(null);
+    let cloudCount = 0;
+    for (const [k, v] of Object.entries(remote)) {
+      if (isOurs(k) && k !== GROUP_INDEX_KEY && k !== SITE_TOMBS_KEY && v?.v != null) cloudCount += 1;
+    }
+
+    if (cloudCount > 0 && !conf.mergedOnce && !(await isFreshLocal())) {
+      pendingDirectionChoice = { cloudCount };
+      return false;
+    }
+
     const res = await pullMerge(remote);
     pulled = res.pulled;
     if (Object.keys(res.toPush).length) await pushRecords(res.toPush);
@@ -335,7 +414,12 @@ async function pushPending() {
   pendingPush.clear();
   if (!keys.length) return;
   if (conf.mode === 'webdav') {
-    // WebDAV 没有逐键写：一次「拉-合并-推」全量往返，把积压一次清掉
+    // WebDAV 没有逐键写：一次「拉-合并-推」往返。分文件版只上传有改动的段，
+    // 这里先把待推键换算成段号记入 davWanted，本轮结束后才清账。
+    for (const k of keys) {
+      const s = davSectionOf(k);
+      if (s) davWanted.add(s);
+    }
     const r = await webdavRound();
     if (!r.ok) {
       // 认证类错误重试一万次也还是 401，而每一次 401 都可能换来一个原生登录弹窗。
@@ -447,6 +531,8 @@ export async function overwriteLocalFromRemote() {
       await saveSyncConf(conf);
     }
     await markMerged();
+    // 覆盖是全量变更：广播所有页面立刻重载，别等各自的 onLocalChange 防抖
+    if (remoteListener) remoteListener();
     return { ok: count > 0, count };
   } catch (err) {
     console.warn('sync overwrite failed', err);
@@ -454,16 +540,29 @@ export async function overwriteLocalFromRemote() {
   }
 }
 
-/* WebDAV 版逃生口：读快照 → 逐条强制落盘（不看时间戳）→ 按云端索引清掉多余分组。
+/* WebDAV 版逃生口：分文件优先，没有 meta（还没迁移的旧云端）退回读旧快照。
+   读到什么就逐条强制落盘（不看时间戳），再按云端索引清掉多余分组。
    三条与 browser 版一致的语义，外加两条 WebDAV 特有的：
    - 云端墓碑表也一并接管：本机私有的删除记录不能反过来把云端数据藏起来；
-   - 云端没有快照时明确返回 empty，而不是「成功恢复 0 项」这种让人误以为生效的结果。 */
+   - 云端没有数据时明确返回 empty，而不是「成功恢复 0 项」这种让人误以为生效的结果。 */
 async function overwriteFromWebdav() {
   const dconf = conf.webdav || {};
-  const got = await davGet(dconf);
-  if (got.error) return { ok: false, count: 0, reason: got.error };
-  if (!got.snapshot) return { ok: false, count: 0, reason: 'empty' };
-  const records = got.snapshot.records || {};
+  const m = await davGetMeta(dconf, { force: true });
+  if (m.error) return { ok: false, count: 0, reason: m.error };
+  let records = null;
+  if (m.data) {
+    records = {};
+    for (const sec of DAV_SECTIONS) {
+      const r = await davGetSection(dconf, sec, { force: true });
+      if (r.error) return { ok: false, count: 0, reason: r.error };
+      Object.assign(records, r.data?.records || {});
+    }
+  } else {
+    const got = await davGetLegacy(dconf, { force: true });
+    if (got.error) return { ok: false, count: 0, reason: got.error };
+    if (!got.data) return { ok: false, count: 0, reason: 'empty' };
+    records = got.data.records || {};
+  }
   let count = 0;
   for (const [key, rec] of Object.entries(records)) {
     if (!isOurs(key) || rec?.v == null) continue;
@@ -478,10 +577,91 @@ async function overwriteFromWebdav() {
   if (idx) await reconcileGroups(idx, true);
   if (count) {
     conf.lastSyncAt = Date.now();
-    await saveSyncConf(conf);
   }
+  // 代际号基线对齐云端：别让下一轮把刚恢复的数据当成「没见过」再折腾一遍
+  if (m.data) {
+    conf.davGens = {};
+    for (const [s, f] of Object.entries(m.data.files || {})) conf.davGens[s] = f.gen || 0;
+    conf.davResync = [];
+  }
+  await saveSyncConf(conf);
   await markMerged();
+  if (remoteListener) remoteListener();
   return { ok: count > 0, count };
+}
+
+/* ---------- 强制以本地为准（1.5.0 双向开关的另一向） ----------
+   把本机数据整体推上云端，不看时间戳。两个用途：
+   ① 首次开启同步且本机是使用状态时，用户明确选择「云端归本机管」；
+   ② 云端被污染/旧数据覆盖后，用数据完好的那台机器把它顶回来 ——
+      这正是 1.5.0 真机事故的标准恢复手段。 */
+export async function overwriteRemoteFromLocal() {
+  if (conf.mode === 'webdav') return overwriteWebdavFromLocal();
+  if (conf.mode !== 'browser' || !hasSync) return { ok: false, count: 0, reason: 'off' };
+  try {
+    const units = await loadUnits();
+    const writes = {};
+    for (const [k, rec] of Object.entries(units)) if (rec?.v != null) writes[k] = rec;
+    const ok = await pushRecords(writes);
+    if (ok) {
+      // 云端有、本机没有的键也清掉，让云端与本机完全一致。
+      // 墓碑记录例外：本机可能从来没删过卡片，云端的墓碑留着无害（90 天过期）。
+      const remote = await chrome.storage.sync.get(null);
+      const drop = Object.keys(remote).filter(
+        (k) => isOurs(k) && k !== SITE_TOMBS_KEY && !writes[k]
+      );
+      if (drop.length) await chrome.storage.sync.remove(drop);
+      conf.lastSyncAt = Date.now();
+      await saveSyncConf(conf);
+      await markMerged();
+    }
+    return { ok, count: Object.keys(writes).length };
+  } catch (err) {
+    console.warn('overwrite remote failed', err);
+    return { ok: false, count: 0, reason: 'error' };
+  }
+}
+
+async function overwriteWebdavFromLocal() {
+  const dconf = conf.webdav || {};
+  if (!hasCred(dconf)) return { ok: false, count: 0, reason: 'nocred' };
+  // 先读云端代际号（还没有分文件就从 0 起算），再整库分四份推上去。
+  // 用户明确选了方向，这里不走代际号锁——「本机覆盖云端」就是要盖过一切。
+  const m = await davGetMeta(dconf, { force: true });
+  if (m.error) return { ok: false, count: 0, reason: m.error };
+  const units = await loadUnits();
+  const now = Date.now();
+  const filesMeta = {};
+  for (const sec of DAV_SECTIONS) {
+    const records = recordsOfSection(units, sec);
+    const gen = (m.data?.files?.[sec.id]?.gen || 0) + 1;
+    const put = await davPut(
+      dconf,
+      {
+        app: 'firstlight', ver: 2, section: sec.id, gen, savedAt: now,
+        deviceId: conf.deviceId || '', appVer: appVersion(), caps: CAPS, records
+      },
+      sec.file
+    );
+    if (put.error) return { ok: false, count: 0, reason: put.error };
+    filesMeta[sec.id] = { gen, updatedAt: now, deviceId: conf.deviceId || '' };
+  }
+  const mput = await davPut(
+    dconf,
+    {
+      app: 'firstlight', ver: 2, appVer: appVersion(), caps: CAPS, savedAt: now,
+      deviceId: conf.deviceId || '', files: filesMeta
+    },
+    DAV_META
+  );
+  if (mput.error) return { ok: false, count: 0, reason: mput.error };
+  conf.davGens = {};
+  for (const [s, f] of Object.entries(filesMeta)) conf.davGens[s] = f.gen;
+  conf.davResync = [];
+  conf.lastSyncAt = now;
+  await saveSyncConf(conf);
+  await markMerged();
+  return { ok: true, count: Object.keys(units).length };
 }
 
 /* ---------- 接收其他设备的推送 ---------- */
@@ -590,15 +770,58 @@ async function applyRemote(touched, changes) {
   if (pulled && remoteListener) remoteListener();
 }
 
-/* ================= WebDAV 后端 =================
-   与浏览器后端的本质差别：没有变更推送通道，也没有 8KB 配额压力。
-   所以走「全量快照」：一个 JSON 文件 = 全部 monk.* 记录（含订阅内容）。
-   每次同步 = 拉快照 → 按记录合并（与浏览器后端同一套 pullMerge）→ 把合并后的
-   完整快照传回去。**先拉后推**保证并发安全：另一台设备刚推的新数据不会
-   被本机的旧状态直接盖掉——本机先把它并进来，再上传合并结果。
-   快照文件本身就是备份：用户随时可以下载一份当离线保命符。 */
-const WEBDAV_FILE = 'firstlight-sync.json';
-const WEBDAV_BAK = 'firstlight-sync.bak.json'; // 每次覆盖前留的上一份快照，误覆盖时能捞回来
+/* ================= WebDAV 后端（分文件版） =================
+   Essential difference from the browser backend: no change push channel, and no 8KB quota pressure.
+
+   1.5.0 起弃用「单快照全量覆盖」（firstlight-sync.json），改为分文件：
+     fl-settings.json  settings / dock / stats（设置·壁纸·统计）
+     fl-sites.json     groupidx + 全部分组分片 + 卡片墓碑（收藏域）
+     fl-todos.json     todos（待办）
+     fl-feeds.json     feeds + events（RSS 订阅与日历）
+     fl-meta.json      每个文件的代际号 gen + 更新时间 + 写入设备
+
+   为什么分文件：单快照 = 任何一台设备把「整份数据」推上去。内存陈旧的窗口
+   （1.5.0 真机事故的根源）会把云端整体盖回旧版，还带着新时间戳。分文件 +
+   代际号后，一次写入只覆盖一个域；写入前重读 meta，云端 gen 比自己合并时
+   看到的新 = 有别的设备刚写过 = 放弃本次上传，下一轮重拉重并。这与 store.js
+   的本地乐观锁是同一条思路搬到云端。
+
+   每次同步（davRoundInner）：
+     读 meta → 只拉 gen 有变化的段 → pullMerge（带 relevant 过滤）→
+     重读 meta 做代际号校验 → PUT 有改动的段 → PUT meta。
+   先拉后推 + 代际号锁共同保证并发安全。
+
+   旧快照的处理：meta 不存在时读一次 firstlight-sync.json（旧版写入的），
+   合并进本地后一次性写成五个新文件，旧文件保留在网盘里不再读写，当存档。
+   日备份轮转 bak → bak1 → bak2 改为整库快照写入 fl-backup.json 链，
+   每天第一次覆盖前把当时的云端状态存档一份。 */
+const WEBDAV_FILE = 'firstlight-sync.json'; // 旧版单快照：只读（迁移源），不再写入
+const DAV_META = 'fl-meta.json';
+const DAV_BACKUP = 'fl-backup.json';
+const DAV_BACKUP1 = 'fl-backup.bak1.json'; // 跨天轮转：昨日
+const DAV_BACKUP2 = 'fl-backup.bak2.json'; // 跨天轮转：前日
+
+/* 四个数据域：与用户可见概念一一对应（设置 / 收藏 / 待办 / 订阅）。
+   has(k) 决定一个存储键归哪个文件——所有参与同步的 monk.* 键必须恰好归一段。 */
+const DAV_SECTIONS = [
+  {
+    id: 'settings', file: 'fl-settings.json',
+    has: (k) => k === 'monk.settings.v1' || k === 'monk.dock.v1' || k === 'monk.stats.v1'
+  },
+  {
+    id: 'sites', file: 'fl-sites.json',
+    has: (k) => k === GROUP_INDEX_KEY || k === SITE_TOMBS_KEY || k.startsWith(GROUP_PREFIX)
+  },
+  { id: 'todos', file: 'fl-todos.json', has: (k) => k === 'monk.todos.v1' },
+  { id: 'feeds', file: 'fl-feeds.json', has: (k) => k === 'monk.feeds.v1' || k === 'monk.events.v1' }
+];
+const davSectionOf = (key) => DAV_SECTIONS.find((s) => s.has(key))?.id || null;
+
+function recordsOfSection(units, sec) {
+  const out = {};
+  for (const [k, rec] of Object.entries(units || {})) if (sec.has(k)) out[k] = rec;
+  return out;
+}
 
 // 设置页状态面板最近一次检查的缓存（webdavRound / davGet 顺手填）
 export let lastDavCheck = null;
@@ -699,7 +922,8 @@ function classify(res) {
   return null;
 }
 
-async function davGet(dconf, opt = {}) {
+/* GET 一个云端 JSON 文件的公共实现：404 = 文件不存在（返回 data:null，不算错）。 */
+async function davGetJson(dconf, name, validate, opt = {}) {
   const base = davUrl(dconf);
   if (!base) return { error: 'badurl' };
   if (!hasCred(dconf)) return { error: 'nocred' };
@@ -708,12 +932,12 @@ async function davGet(dconf, opt = {}) {
     if (cool) return { error: cool, cooled: true };
   }
   try {
-    const res = await davFetch(base + WEBDAV_FILE, 15000, { headers: davHeaders(dconf) });
+    const res = await davFetch(base + name, 15000, { headers: davHeaders(dconf) });
     const bad = classify(res);
     // 404 有两种：文件还没推过（合法的空桶），或者目录压根不存在。
     // 这里当空桶处理，写的时候 PUT 会拿到 409 再回来告诉我们目录有问题。
     if (bad) return bad;
-    if (res.status === 404) return { snapshot: null };
+    if (res.status === 404) return { data: null };
     if (!res.ok) return { error: `http ${res.status}`, status: res.status };
     const ct = (res.headers.get('content-type') || '').toLowerCase();
     const text = await res.text();
@@ -725,14 +949,27 @@ async function davGet(dconf, opt = {}) {
     } catch {
       return { error: 'format' };
     }
-    if (!json || json.app !== 'firstlight' || typeof json.records !== 'object') {
-      return { error: 'format' };
-    }
-    return { snapshot: json };
+    if (!validate(json)) return { error: 'format' };
+    return { data: json };
   } catch (err) {
     return { error: netErr(err) };
   }
 }
+
+const isLegacySnapshot = (j) => !!j && j.app === 'firstlight' && typeof j.records === 'object';
+const isMetaFile = (j) => !!j && j.app === 'firstlight' && typeof j.files === 'object';
+const isSectionFile = (sec) => (j) =>
+  !!j && j.app === 'firstlight' && j.section === sec.id && typeof j.records === 'object';
+
+// 旧版单快照：只在「云端还没有 fl-meta.json」时读一次，作为迁移的数据源
+const davGetLegacy = (dconf, opt = {}) =>
+  davGetJson(dconf, WEBDAV_FILE, isLegacySnapshot, opt);
+
+const davGetMeta = (dconf, opt = {}) =>
+  davGetJson(dconf, DAV_META, isMetaFile, opt);
+
+const davGetSection = (dconf, sec, opt = {}) =>
+  davGetJson(dconf, sec.file, isSectionFile(sec), opt);
 
 async function davPut(dconf, body, name = WEBDAV_FILE) {
   const base = davUrl(dconf);
@@ -758,6 +995,28 @@ async function davPut(dconf, body, name = WEBDAV_FILE) {
     const bad = classify(res);
     if (bad) return bad;
     if (!res.ok) return { error: `http ${res.status}`, status: res.status };
+    return { ok: true };
+  } catch (err) {
+    return { error: netErr(err) };
+  }
+}
+
+/* WebDAV MOVE：备份轮转用（bak → bak1 → bak2）。
+   Destination 必须是完整 URL（RFC 4918 允许绝对路径，但坚果云等实现只认绝对 URL）。
+   源文件不存在（还没备份过）返回 ok+skipped，不算错。 */
+async function davMove(dconf, from, to) {
+  const base = davUrl(dconf);
+  if (!base) return { error: 'badurl' };
+  if (!hasCred(dconf)) return { error: 'nocred' };
+  try {
+    const res = await davFetch(base + from, 12000, {
+      method: 'MOVE',
+      headers: davHeaders(dconf, { Destination: new URL(to, base).href, Overwrite: 'T' })
+    });
+    if (res.status === 404) return { ok: true, skipped: true };
+    const bad = classify(res);
+    if (bad) return bad;
+    if (!res.ok) return { error: `http ${res.status}` };
     return { ok: true };
   } catch (err) {
     return { error: netErr(err) };
@@ -802,13 +1061,20 @@ async function davProbe(dconf) {
     if (!bad && res.ok) return { ok: true };
     if (bad) return { ok: false, error: bad.error, status: bad.status, probeStatus: status };
     const probeErr = `http ${res.status}`;
-    // 降级：直接测真实快照路径
-    const got = await davGet(dconf, { force: true });
-    const body = got.snapshot || {
-      app: 'firstlight', ver: 1, appVer: appVersion(), caps: CAPS,
-      savedAt: 0, deviceId: '', records: {}
+    /* 降级：直接测真实数据路径（meta 文件）。
+       注意「本来没有 meta」时必须写完再删掉 —— 否则一次连接测试就会凭空
+       造出一个空 meta，让后续同步误判「云端已是分文件格式」，从而跳过
+       旧快照迁移，旧云端的数据就再也并不进来了。 */
+    const m = await davGetMeta(dconf, { force: true });
+    const hadMeta = !!m.data;
+    const body = m.data || {
+      app: 'firstlight', ver: 2, appVer: appVersion(), caps: CAPS,
+      savedAt: 0, deviceId: '', files: {}
     };
-    const put = await davPut(dconf, body);
+    const put = await davPut(dconf, body, DAV_META);
+    if (put.ok && !hadMeta) {
+      await davFetch(base + DAV_META, 8000, { method: 'DELETE', headers: davHeaders(dconf) }).catch(() => {});
+    }
     if (put.ok) return { ok: true, viaSnapshot: true, probeBlocked: probeErr };
     return { ok: false, error: put.error || probeErr, status: put.status, probeStatus: status };
   } catch (err) {
@@ -841,6 +1107,7 @@ let autoPullTimer = null;
 
 export function backgroundPull() {
   if (!hasSync || conf.mode !== 'webdav') return;
+  if (isManual()) return; // 手动模式：切回前台也不拉，只有「立即同步」才动云端
   if (typeof document !== 'undefined' && document.hidden) return;
   const now = Date.now();
   if (now - lastAutoPullAt < PULL_THROTTLE) return;
@@ -860,90 +1127,277 @@ export function backgroundPull() {
    设置页用它提示「有台设备在用旧版，可能抹掉卡片删除记录」。 */
 export let lastDavPeer = null;
 
+/* 待上传的段号集合（pushPending 记账）。本轮成功上传后才清账；
+   单飞轮次进行中新增的键留给下一轮，不会丢。 */
+const davWanted = new Set();
+
+/* 每天第一次覆盖前的整库存档：fl-backup.json → bak1 → bak2 轮转。
+   本轮已拉取的段直接复用，没拉到的段现拉一次——备份必须是覆盖前的
+   完整云端状态，不能拿本机合并后的结果冒充。
+
+   三条硬要求（都是「备份看着有、真要用时是废的」的坑）：
+   1) 某一段读失败就整次放弃，不要拿残缺数据当备份，也不要推进
+      lastBackupDay —— 下轮还能再试一次；
+   2) 轮转的 MOVE 失败必须中止，否则接下来 PUT 会盖掉 bak，历史备份
+      白丢一层；
+   3) PUT 失败同样不推进日期，否则当天再也不会重试（原来这里连返回值
+      都没看，备份失败是彻底静默的）。 */
+async function davBackup(dconf, fetched, opt = {}) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (conf.lastBackupDay === today) return { ok: true, skipped: true };
+  const records = { ...fetched };
+  // 迁移/空桶路径下四个段文件必然不存在，别为它们各发一次注定 404 的 GET
+  if (!opt.skipFetch) {
+    for (const sec of DAV_SECTIONS) {
+      if (Object.keys(records).some((k) => sec.has(k))) continue;
+      const r = await davGetSection(dconf, sec, { force: true });
+      if (r.error) return { ok: false, reason: r.error };
+      if (!r.data) continue; // 404：这段云端本来就没有，不算残缺
+      Object.assign(records, r.data.records || {});
+    }
+  }
+  const m1 = await davMove(dconf, DAV_BACKUP1, DAV_BACKUP2);
+  if (m1.error) return { ok: false, reason: m1.error };
+  const m2 = await davMove(dconf, DAV_BACKUP, DAV_BACKUP1);
+  if (m2.error) return { ok: false, reason: m2.error };
+  const put = await davPut(dconf, {
+    app: 'firstlight', ver: 2, appVer: appVersion(), caps: CAPS,
+    savedAt: Date.now(), deviceId: conf.deviceId || '', records
+  }, DAV_BACKUP);
+  if (put.error) return { ok: false, reason: put.error };
+  conf.lastBackupDay = today;
+  await saveSyncConf(conf);
+  return { ok: true };
+}
+
 async function davRoundInner() {
   const dconf = conf.webdav;
   if (!hasCred(dconf)) {
     lastDavCheck = { ok: false, error: 'nocred', at: Date.now() };
     return { ok: false, reason: 'nocred' };
   }
-  const got = await davGet(dconf);
-  if (got.error) {
-    lastDavCheck = { ok: false, error: got.error, at: Date.now() };
-    return { ok: false, reason: got.error };
+  const wanted = new Set(davWanted); // 本轮快照；成功上传后才从 davWanted 清掉
+
+  /* ① 读 meta（代际号总表）。404 = 云端还没有分文件：要么是空桶，
+     要么还是旧版单快照（需要迁移）。 */
+  const mres = await davGetMeta(dconf);
+  if (mres.error) {
+    lastDavCheck = { ok: false, error: mres.error, at: Date.now() };
+    return { ok: false, reason: mres.error };
+  }
+  const cloudMeta = mres.data;
+  let legacy = null;
+  if (!cloudMeta) {
+    const lres = await davGetLegacy(dconf);
+    if (lres.error) {
+      lastDavCheck = { ok: false, error: lres.error, at: Date.now() };
+      return { ok: false, reason: lres.error };
+    }
+    legacy = lres.data;
   }
 
   const mine = appVersion();
-  const cloudVer = String(got.snapshot?.appVer || '');
-  const cloudCaps = Array.isArray(got.snapshot?.caps) ? got.snapshot.caps.map(String) : [];
-
-  /* 版本不对称的三档，先判再合并：
-     ① 云端由比本机更新的**代**（主.次）写过 → 拒绝写。全量 PUT 是覆盖式的，
-        旧代码不认识新字段，写一次就把新版的数据降级了。
-        patch 级差异不算（1.4.0 与 1.4.3 同一套字段与墓碑能力），
-        否则把版本号改小这种正常操作会让全设备集体拒绝上传。
-     ② 云端没有 appVer（1.4.0 之前的版本写的）→ 它能读我们的，但我们
-        推上去的 sitetombs 它读不懂、下次全量推送会抹掉。只能告警。
+  /* 版本不对称的三档，先判再合并（依据 meta 或旧快照的 appVer）：
+     ① 云端由比本机更新的**代**（主.次）写过 → 拒绝写。旧代码不认识新字段，
+        写一次就把新版的数据降级了。patch 级差异不算。
+     ② 云端没有 appVer（1.4.0 之前的版本写的）→ 只能告警。
      ③ 两边都够新 → 正常。 */
-  if (got.snapshot && cloudVer && compareFamily(cloudVer, mine) > 0) {
-    lastDavPeer = { ver: cloudVer, caps: cloudCaps, legacy: false, newer: true };
+  const peerSrc = cloudMeta || legacy || null;
+  const cloudVer = String(peerSrc?.appVer || '');
+  const cloudCaps = Array.isArray(peerSrc?.caps) ? peerSrc.caps.map(String) : [];
+  if (peerSrc && cloudVer && compareFamily(cloudVer, mine) > 0) {
+    lastDavPeer = { ver: cloudVer, caps: cloudCaps, legacy: !cloudMeta, newer: true };
     lastDavCheck = { ok: false, error: 'newercloud', at: Date.now() };
     return { ok: false, reason: 'newercloud', cloudVer };
   }
-  if (got.snapshot) {
-    const legacy = !cloudVer || compareVer(cloudVer, CAPS_VER) < 0;
-    lastDavPeer = { ver: cloudVer || '未知（1.4.0 之前）', caps: cloudCaps, legacy, newer: false };
+  if (peerSrc) {
+    const legacyPeer = !cloudVer || compareVer(cloudVer, CAPS_VER) < 0;
+    lastDavPeer = { ver: cloudVer || '未知（1.4.0 之前）', caps: cloudCaps, legacy: legacyPeer, newer: false };
   } else {
     lastDavPeer = null;
   }
 
+  /* ② 拉取。分文件版只拉「gen 有变化的段」；迁移/空桶走整库。 */
   let pulled = false;
-  if (got.snapshot) {
-    const res = await pullMerge(got.snapshot.records || {});
+  let pushAll = false;
+  const toPush = {};
+  const fetched = {}; // 本轮真正看到的云端记录（mergebad 保险丝 + 日备份用）
+  const fetchedKeys = new Set();
+  const baseGens = {}; // 各段本轮看到的云端 gen（代际号锁的基准）
+
+  if (legacy && !cloudMeta) {
+    /* ---- 迁移：旧单快照并进本地，然后整库写成五个新文件 ----
+       旧文件保留在网盘里不再读写。合并结果保存在本地，靠下面的整库推送上云。 */
+    for (const [k, rec] of Object.entries(legacy.records || {})) fetched[k] = rec;
+    const res = await pullMerge(legacy.records || {});
     pulled = res.pulled;
+    Object.assign(toPush, res.toPush);
+    pushAll = true;
     await markMerged();
+  } else if (!cloudMeta && !legacy) {
+    /* ---- 空桶首同步：整库推上去（与旧版「注册云端」行为一致）---- */
+    pushAll = true;
+    await markMerged();
+  } else {
+    for (const sec of DAV_SECTIONS) baseGens[sec.id] = cloudMeta.files?.[sec.id]?.gen || 0;
+    // davResync：上一轮 meta 写失败留下的「文件与 meta 可能不一致」的段，强制重拉
+    const stale = DAV_SECTIONS.filter(
+      (sec) =>
+        (Array.isArray(conf.davResync) && conf.davResync.includes(sec.id)) ||
+        (conf.davGens?.[sec.id] ?? -1) !== baseGens[sec.id]
+    );
+    for (const sec of stale) {
+      const r = await davGetSection(dconf, sec);
+      if (r.error) {
+        lastDavCheck = { ok: false, error: r.error, at: Date.now() };
+        return { ok: false, reason: r.error };
+      }
+      if (r.data) {
+        for (const [k, rec] of Object.entries(r.data.records || {})) {
+          fetched[k] = rec;
+          fetchedKeys.add(k);
+        }
+        /* 重拉成功就把这段的 resync 标记摘掉。不摘的话它会一直挂在链表里：
+           本轮若恰好没有要上传的段（target 为空），下面清标记的分支根本
+           走不到，于是往后每一轮都白白重拉这一个段，永远清不掉。 */
+        if (Array.isArray(conf.davResync) && conf.davResync.includes(sec.id)) {
+          conf.davResync = conf.davResync.filter((x) => x !== sec.id);
+        }
+      }
+      conf.davGens = conf.davGens || {};
+      conf.davGens[sec.id] = baseGens[sec.id];
+    }
+    if (stale.length) {
+      // relevant：只比较拉过的段，没拉的段不参与「谁新谁旧」的裁决
+      const res = await pullMerge(fetched, fetchedKeys);
+      pulled = res.pulled;
+      Object.assign(toPush, res.toPush);
+      await markMerged();
+      await saveSyncConf(conf); // 记住 gen 基线，下轮好跳过没变的段
+    }
   }
-  const units = await loadUnits();
-  const payload = {
-    app: 'firstlight',
-    ver: 1,
-    appVer: mine,
-    caps: CAPS,
-    savedAt: Date.now(),
-    deviceId: conf.deviceId || '',
-    records: units
-  };
-  /* 保险丝：合并完整性校验。两层：
-     ① 云端快照里有记录、但一条都不被本版本识别（isOurs 全判否）——
-        典型成因是某次升级改了存储键前缀，旧快照瞬间变成「别人的数据」，
-        全量 PUT 会把它盖掉；
-     ② 有能识别的记录、但合并后本地缺了其中任何一条 —— 说明合并环节出了问题。
-     两种情况都宁可不写，让用户先查清楚。
-     （只查「本地一条都没有」不够：首装默认数据落盘后本地永远非空。） */
-  const allKeys = Object.keys(got.snapshot?.records || {});
-  const cloudKeys = allKeys.filter(isOurs);
-  // 分组记录缺席要有豁免：id 在本地分组墓碑里的，是刚被合法清掉的，不是合并失败
-  const idxTombs = units[GROUP_INDEX_KEY]?.d || {};
-  const missing = cloudKeys.filter(
-    (k) => !units[k] && !(k.startsWith(GROUP_PREFIX) && idxTombs[gidOf(k)])
-  );
-  const mergeBroken =
-    (allKeys.length > 0 && cloudKeys.length === 0) || missing.length > 0;
-  if (mergeBroken) {
-    lastDavCheck = { ok: false, error: 'mergebad', at: Date.now() };
-    return { ok: false, reason: 'mergebad' };
+
+  /* ③ 要上传的段 = 合并产出 ∪ pushPending 记账 ∪ 迁移/空桶的整库 */
+  const target = new Set();
+  for (const k of Object.keys(toPush)) {
+    const s = davSectionOf(k);
+    if (s) target.add(s);
   }
-  /* 保险丝：覆盖前把云端旧快照备份一份。万一将来某次改动让合并静默失效，
-     至少 .bak 里还有上一份完整数据。内容没变就不浪费这一次请求。 */
-  if (got.snapshot && JSON.stringify(got.snapshot) !== JSON.stringify(payload)) {
-    await davPut(dconf, got.snapshot, WEBDAV_BAK);
+  for (const s of wanted) target.add(s);
+  if (pushAll) for (const sec of DAV_SECTIONS) target.add(sec.id);
+
+  if (target.size) {
+    const units = await loadUnits();
+    /* 保险丝：合并完整性校验（只查本轮拉到的段）。
+       云端有记录、但合并后本地缺了其中任何一条 = 合并环节出了问题，
+       宁可不写，让用户先查清楚。 */
+    const allKeys = Object.keys(fetched);
+    const cloudKeys = allKeys.filter(isOurs);
+    // 分组记录缺席要有豁免：id 在本地分组墓碑里的，是刚被合法清掉的，不是合并失败
+    const idxTombs = units[GROUP_INDEX_KEY]?.d || {};
+    // 空的卡片墓碑表也豁免：它不携带任何信息（没有删过卡），本地缺这份记录是常态。
+    // 云端有 {v:{}}、本地没有，并不等于合并丢了东西。
+    const emptyTombs = (k, rec) => k === SITE_TOMBS_KEY && !Object.keys(rec?.v || {}).length;
+    const missing = cloudKeys.filter(
+      (k) =>
+        !units[k] &&
+        !emptyTombs(k, fetched[k]) &&
+        !(k.startsWith(GROUP_PREFIX) && idxTombs[gidOf(k)])
+    );
+    if ((allKeys.length > 0 && cloudKeys.length === 0) || missing.length > 0) {
+      lastDavCheck = { ok: false, error: 'mergebad', at: Date.now() };
+      return { ok: false, reason: 'mergebad' };
+    }
+
+    /* 保险丝：每天第一次覆盖前把云端旧状态存档（⑥ 日备份）。
+       空桶 + 无旧快照时没有可备份的东西，跳过。
+       备份失败不阻断同步（同步是用户的主诉求），但要留痕：下一轮会再试，
+       因为失败时 lastBackupDay 没推进。 */
+    if (cloudMeta || legacy) {
+      const bk = await davBackup(dconf, fetched, { skipFetch: !cloudMeta });
+      if (!bk.ok) console.warn('云端日备份失败，下轮重试', bk.reason);
+    }
+
+    /* 代际号锁：重读 meta，任一目标段的 gen 比本轮看到的新
+       = 别的设备刚写过 = 放弃上传，下一轮重拉重并。 */
+    const fresh = await davGetMeta(dconf, { force: true });
+    if (fresh.error) {
+      lastDavCheck = { ok: false, error: fresh.error, at: Date.now() };
+      return { ok: false, reason: fresh.error };
+    }
+    const concurrent = (() => {
+      if (cloudMeta) {
+        if (!fresh.data) return true; // meta 中途消失（被人为删了）
+        // target 里存的是段号，不是段对象——这里按 id 取，别写成 sec.id
+        for (const id of target) {
+          const g = fresh.data.files?.[id]?.gen || 0;
+          if (g !== (baseGens[id] || 0)) return true;
+        }
+        return false;
+      }
+      // 本轮走迁移/空桶路径：中途冒出了 meta = 有设备并发迁移，重来一轮
+      return !!fresh.data;
+    })();
+    if (concurrent) {
+      lastDavCheck = { ok: false, error: 'concurrent', at: Date.now() };
+      return { ok: false, reason: 'concurrent' };
+    }
+
+    /* PUT 有改动的段（gen = 本轮基准 + 1），最后写 meta。 */
+    const now = Date.now();
+    const filesMeta = {};
+    let putErr = null;
+    for (const sec of DAV_SECTIONS) {
+      if (!target.has(sec.id)) {
+        const f = cloudMeta?.files?.[sec.id];
+        filesMeta[sec.id] = f
+          ? { gen: f.gen || 0, updatedAt: f.updatedAt || 0, deviceId: f.deviceId || '' }
+          : { gen: 0, updatedAt: 0, deviceId: '' };
+        continue;
+      }
+      const records = recordsOfSection(units, sec);
+      const gen = (baseGens[sec.id] || 0) + 1;
+      const put = await davPut(
+        dconf,
+        {
+          app: 'firstlight', ver: 2, section: sec.id, gen, savedAt: now,
+          deviceId: conf.deviceId || '', appVer: mine, caps: CAPS, records
+        },
+        sec.file
+      );
+      if (put.error) { putErr = put.error; break; }
+      filesMeta[sec.id] = { gen, updatedAt: now, deviceId: conf.deviceId || '' };
+    }
+    if (putErr) {
+      /* 部分段文件已写、meta 没更新：标记这些段下轮强制重拉，
+         宁可多几次请求也不让「文件与 meta 各说各话」。 */
+      conf.davResync = DAV_SECTIONS.filter((s) => target.has(s.id)).map((s) => s.id);
+      await saveSyncConf(conf);
+      lastDavCheck = { ok: false, error: putErr, at: Date.now() };
+      return { ok: false, reason: putErr };
+    }
+    const mput = await davPut(
+      dconf,
+      {
+        app: 'firstlight', ver: 2, appVer: mine, caps: CAPS, savedAt: now,
+        deviceId: conf.deviceId || '', files: filesMeta
+      },
+      DAV_META
+    );
+    if (mput.error) {
+      conf.davResync = DAV_SECTIONS.filter((s) => target.has(s.id)).map((s) => s.id);
+      await saveSyncConf(conf);
+      lastDavCheck = { ok: false, error: mput.error, at: Date.now() };
+      return { ok: false, reason: mput.error };
+    }
+    conf.davGens = {};
+    for (const [s, f] of Object.entries(filesMeta)) conf.davGens[s] = f.gen;
+    conf.davResync = [];
+    conf.lastSyncAt = now;
+    await saveSyncConf(conf);
+    for (const s of wanted) davWanted.delete(s);
   }
-  const put = await davPut(dconf, payload);
-  if (put.error) {
-    lastDavCheck = { ok: false, error: put.error, at: Date.now() };
-    return { ok: false, reason: put.error };
-  }
-  conf.lastSyncAt = Date.now();
-  await saveSyncConf(conf);
+
   lastDavCheck = { ok: true, at: Date.now() };
   return { ok: true, pulled };
 }
@@ -954,8 +1408,17 @@ export async function testWebdav(dconf) {
   resetDavCooldown();
   if (!davUrl(dconf)) return { ok: false, reason: 'badurl' };
   if (!hasCred(dconf)) return { ok: false, reason: 'nocred' };
-  const got = await davGet(dconf, { force: true });
-  if (got.error) return { ok: false, reason: got.error };
+  const m = await davGetMeta(dconf, { force: true });
+  if (m.error) return { ok: false, reason: m.error };
+  let hasSnapshot = !!m.data;
+  let savedAt = m.data?.savedAt || 0;
+  if (!m.data) {
+    // 云端还没有分文件：看一眼旧快照在不在（迁移前状态）
+    const got = await davGetLegacy(dconf, { force: true });
+    if (got.error) return { ok: false, reason: got.error };
+    hasSnapshot = !!got.data;
+    savedAt = got.data?.savedAt || 0;
+  }
   const w = await davProbe(dconf);
   if (!w.ok) {
     return { ok: false, reason: w.error, canRead: true, canWrite: false, probeStatus: w.probeStatus };
@@ -964,8 +1427,8 @@ export async function testWebdav(dconf) {
     ok: true,
     canRead: true,
     canWrite: true,
-    hasSnapshot: !!got.snapshot,
-    savedAt: got.snapshot?.savedAt || 0,
+    hasSnapshot,
+    savedAt,
     probeBlocked: w.probeBlocked || ''
   };
 }
@@ -997,12 +1460,13 @@ export function davErrText(reason) {
     html: '这个地址返回的是网页，不是 WebDAV 目录（检查地址结尾）',
     format: '服务器上的文件不是本插件的快照（可能是别的文件同名）',
     network: '连不上服务器（检查地址、网络或防火墙）',
-      timeout: '连接超时',
-      off: '同步未开启',
-      newercloud: '云端快照由更新版本的初见写入。为避免把新版数据降级覆盖，这次没有上传 —— 请先把本机升级到最新版再同步',
-      empty: '云端还没有快照（先点「保存并连接」把本机数据推一份上去）',
-      error: '覆盖没有完成，请稍后重试',
-      mergebad: '云端快照的记录没能完整合并进本地（可能是版本兼容问题），为防覆盖云端正本，这次没有写入。请把设置页的「诊断」结果发给开发者'
+    timeout: '连接超时',
+    off: '同步未开启',
+    newercloud: '云端快照由更新版本的初见写入。为避免把新版数据降级覆盖，这次没有上传 —— 请先把本机升级到最新版再同步',
+    empty: '云端还没有数据（先点「保存并连接」把本机数据推一份上去）',
+    error: '覆盖没有完成，请稍后重试',
+    concurrent: '云端刚被另一台设备更新过，这次没有上传 —— 稍后会自动拉取并重试',
+    mergebad: '云端数据的记录没能完整合并进本地（可能是版本兼容问题），为防覆盖云端正本，这次没有写入。请把设置页的「诊断」结果发给开发者'
   };
   if (map[reason]) return map[reason];
   // 形如 "http 404"：按状态码翻译，别再给用户看「未知错误」
@@ -1072,16 +1536,50 @@ export async function diagnoseWebdav(dconf) {
     return rows;
   }
 
-  const got = await davGet(dconf, { force: true });
-  add(
-    '④ 读快照 GET',
-    !got.error,
-    got.error
-      ? davErrText(got.error)
-      : got.snapshot
-        ? `200 · 已有快照，${Object.keys(got.snapshot.records || {}).length} 条记录`
-        : '404 · 还没有快照（首次同步正常）'
-  );
+  const m = await davGetMeta(dconf, { force: true });
+  if (m.error) {
+    add('④ 读云端 meta', false, davErrText(m.error));
+  } else if (m.data) {
+    let n = 0;
+    let secErr = '';
+    const gens = [];
+    for (const sec of DAV_SECTIONS) {
+      const r = await davGetSection(dconf, sec, { force: true });
+      if (r.error && !secErr) secErr = r.error;
+      if (r.data) {
+        n += Object.keys(r.data.records || {}).length;
+        gens.push(`${sec.id}:g${r.data.gen}`);
+      }
+    }
+    let tail = '';
+    if (!secErr) {
+      // 旧快照残留检测：有台设备还在跑旧版、往 firstlight-sync.json 里写新数据
+      const lg = await davGetLegacy(dconf, { force: true });
+      if (lg.data) {
+        tail = (lg.data.savedAt || 0) > (m.data.savedAt || 0)
+          ? '；⚠ 旧快照比分文件新，说明有一台设备还在跑旧版插件，请全部升级'
+          : '；旧快照存档仍在（不再读写）';
+      }
+    }
+    add(
+      '④ 读云端（分文件）',
+      !secErr,
+      secErr
+        ? davErrText(secErr)
+        : `meta OK · ${n} 条记录 · ${gens.join(' ')}${tail}`
+    );
+  } else {
+    const got = await davGetLegacy(dconf, { force: true });
+    add(
+      '④ 读云端',
+      !got.error,
+      got.error
+        ? davErrText(got.error)
+        : got.data
+          ? `200 · 旧版单快照（${Object.keys(got.data.records || {}).length} 条记录），下次同步自动迁移为分文件`
+          : '404 · 云端还没有数据（首次同步正常）'
+    );
+  }
 
   const w = await davProbe(dconf);
   // 坚果云对「根目录直接建文件」时灵时不灵，一直 404 时给个可执行的下一步
@@ -1130,11 +1628,24 @@ function summarizeUnits(records) {
 // 面板数据：本机一把抓；云端按后端各查各的。读取失败不抛，把错误放结果里。
 export async function getSyncStatus() {
   const units = await loadUnits();
+  /* 面板上「本机 / 云端」两个数字要能对比：本机专属数据（稍后读、日历缓存、
+     弹窗队列）永不上云，混进 local.records 会让用户以为云端丢了东西。 */
+  const syncable = {};
+  let localOnly = 0;
+  for (const [k, v] of Object.entries(units)) {
+    if (!isOurs(k)) {
+      localOnly += 1;
+      continue;
+    }
+    syncable[k] = v;
+  }
   const base = {
     mode: conf.mode,
+    autoSync: conf.autoSync !== false,
     lastSyncAt: conf.lastSyncAt || 0,
     deviceId: conf.deviceId || '',
-    local: summarizeUnits(units)
+    local: summarizeUnits(syncable),
+    localOnly
   };
   if (conf.mode === 'browser' && hasSync) {
     try {
@@ -1149,24 +1660,53 @@ export async function getSyncStatus() {
   }
   if (conf.mode === 'webdav') {
     // 面板是用户主动点开看的，忽略冷却期，拿一次真实结果
-    const got = await davGet(conf.webdav || {}, { force: true });
-    lastDavCheck = { ok: !got.error, error: got.error, at: Date.now() };
+    const dconf = conf.webdav || {};
+    const m = await davGetMeta(dconf, { force: true });
+    let error = m.error || '';
+    let remote = null;
+    let remoteSavedAt = 0;
+    let remoteDeviceId = '';
+    let peer = null;
+    const peerOf = (src) => ({
+      ver: src.appVer || '',
+      legacy: !src.appVer || compareVer(src.appVer, CAPS_VER) < 0,
+      newer: !!src.appVer && compareFamily(src.appVer, appVersion()) > 0,
+      caps: Array.isArray(src.caps) ? src.caps.map(String) : []
+    });
+    if (!error && m.data) {
+      // 分文件云端：meta 概况 + 四个段逐一读（并行，网盘慢时别排队等 4 个往返）
+      remoteSavedAt = m.data.savedAt || 0;
+      remoteDeviceId = m.data.deviceId || '';
+      const records = {};
+      const parts = await Promise.all(
+        DAV_SECTIONS.map((sec) => davGetSection(dconf, sec, { force: true }))
+      );
+      parts.forEach((r) => {
+        if (r.error && !error) error = r.error;
+        Object.assign(records, r.data?.records || {});
+      });
+      remote = summarizeUnits(records);
+      peer = { ...peerOf(m.data), split: true };
+    } else if (!error) {
+      // 还没迁移：读旧单快照
+      const got = await davGetLegacy(dconf, { force: true });
+      error = got.error || '';
+      if (got.data) {
+        remote = summarizeUnits(got.data.records || {});
+        remoteSavedAt = got.data.savedAt || 0;
+        remoteDeviceId = got.data.deviceId || '';
+        peer = { ...peerOf(got.data), split: false };
+      }
+    }
+    lastDavCheck = { ok: !error, error, at: Date.now() };
     return {
       ...base,
       url: conf.webdav?.url || '',
-      remote: got.snapshot ? summarizeUnits(got.snapshot.records || {}) : null,
-      remoteSavedAt: got.snapshot?.savedAt || 0,
-      remoteDeviceId: got.snapshot?.deviceId || '',
-      // 云端版本：没有 appVer 就是 1.4.0 之前写的（读得懂我们，但会抹掉 sitetombs）
-      peer: got.snapshot
-        ? {
-            ver: got.snapshot.appVer || '',
-            legacy: !got.snapshot.appVer || compareVer(got.snapshot.appVer, CAPS_VER) < 0,
-            newer: !!got.snapshot.appVer && compareFamily(got.snapshot.appVer, appVersion()) > 0,
-            caps: Array.isArray(got.snapshot.caps) ? got.snapshot.caps.map(String) : []
-          }
-        : null,
-      error: got.error
+      remote,
+      remoteSavedAt,
+      remoteDeviceId,
+      peer,
+      error
     };
   }
   return base;
@@ -1182,6 +1722,13 @@ export async function syncNow() {
   }
   if (conf.mode === 'webdav') {
     resetDavCooldown(); // 手动点「立即同步」= 用户明确要求再试一次
+    // 手动模式 / 还没到防抖时间的改动都记在 pendingPush 里，先换算成段号；
+    // 转完清掉 pendingPush，本轮失败由 davWanted 兜底重试。
+    for (const k of pendingPush) {
+      const s = davSectionOf(k);
+      if (s) davWanted.add(s);
+    }
+    pendingPush.clear();
     return webdavRound();
   }
   return { ok: false, reason: 'off' };

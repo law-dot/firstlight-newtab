@@ -64,7 +64,23 @@
 
     <div class="search-row">
       <form autocomplete="off" class="search" id="searchForm">
-        <select aria-label="搜索引擎" class="engine" id="engineSelect"></select>
+        <div class="engine-wrap" id="engineWrap">
+          <button aria-expanded="false" aria-haspopup="listbox" class="engine" id="engineBtn" title="搜索引擎" type="button"></button>
+          <div class="engine-pop" hidden id="enginePop" role="listbox">
+            <div id="engineList"></div>
+            <div class="engine-custom" hidden id="engineCustom">
+              <input id="engineCustomUrl" placeholder="https://example.com/search?q=%s" spellcheck="false" type="url">
+              <p class="hint">%s 会被替换成搜索关键词</p>
+              <div class="engine-custom-actions">
+                <button class="btn small" id="engineCustomCancel" type="button">取消</button>
+                <button class="btn small primary" id="engineCustomSave" type="button">保存</button>
+              </div>
+            </div>
+          </div>
+          <!-- 保留原生 select 作数据载体：renderEngines / syncSettingsUI / 快捷键都读写它的 value，
+               真正给用户点的是上面的自绘面板（原生下拉弹层在毛玻璃上有闪跳问题） -->
+          <select aria-hidden="true" hidden id="engineSelect" tabindex="-1"></select>
+        </div>
         <input id="q" placeholder="搜索，或输入网址后回车" spellcheck="false" type="text">
         <button aria-label="搜索" class="go" type="submit">
           <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
@@ -188,14 +204,16 @@
 
     <section class="field">
       <label>强调色</label>
-      <div class="swatches" id="accentSwatches"></div>
-      <label class="color-label">自定义<input id="accentPicker" type="color" value="#7c6cf6"></label>
+      <div class="accent-row">
+        <div class="swatches accent" id="accentSwatches"></div>
+        <label class="color-label">自定义<input id="accentPicker" type="color" value="#7c6cf6"></label>
+      </div>
     </section>
 
-    <section class="field">
-      <label>搜索引擎</label>
-      <select id="engineSetting"></select>
-      <input id="customEngine" placeholder="自定义：https://example.com/search?q=%s">
+    <section class="field" hidden id="customEngineField">
+      <label>自定义搜索地址</label>
+      <input id="customEngine" placeholder="https://example.com/search?q=%s">
+      <p class="hint">在主页搜索框旁的引擎下拉里选「自定义」后，在这里填搜索地址，%s 会被替换成关键词。</p>
     </section>
 
     <section class="field">
@@ -340,6 +358,11 @@
         <button data-val="webdav" type="button">WebDAV</button>
       </div>
       <p class="hint" id="syncHint">数据只保存在本机，不上传任何服务器。</p>
+      <label class="toggle" id="syncAutoRow" hidden>
+        <span>自动同步（关闭后仅点「立即同步」时才与云端交换）</span>
+        <input id="syncAutoToggle" type="checkbox" checked>
+        <span></span>
+      </label>
       <div class="webdav-form" id="webdavForm" hidden>
         <input id="davUrl" placeholder="目录地址，如 https://dav.jianguoyun.com/dav/chujian/">
         <input id="davUser" autocomplete="off" placeholder="账号（坚果云填注册邮箱）">
@@ -357,6 +380,7 @@
         <button class="btn small" id="btnSyncNow" type="button">立即同步</button>
         <button class="btn small" id="btnSyncStatus" type="button">查看同步状态</button>
         <button class="btn small" hidden id="btnSyncPull" type="button">用云端覆盖本机</button>
+        <button class="btn small" id="btnSyncPush" type="button">用本机覆盖云端</button>
       </div>
       <pre class="sync-status" id="syncStatus" hidden></pre>
     </section>
@@ -379,19 +403,6 @@
       </div>
       <input accept="application/json" hidden id="fileImport" type="file">
       <p class="hint">所有数据保存在本机浏览器，不上传任何服务器。</p>
-    </section>
-
-    <section class="field">
-      <label>日历订阅</label>
-      <div class="row">
-        <input class="input" id="feedUrl" placeholder="ICS 地址，如 https://calendar.google.com/calendar/ical/.../basic.ics" type="url">
-      </div>
-      <div class="row">
-        <input class="input" id="feedName" placeholder="名称（可选，默认取 URL 文件名）" type="text">
-        <button class="btn" id="btnAddFeed" type="button">添加</button>
-      </div>
-      <ul class="feed-list" id="feedList"></ul>
-      <p class="hint">支持 Google 日历、Apple 日历、Outlook 等导出的 ICS 订阅链接。每天自动刷新。</p>
     </section>
 
     <section class="field about-field">

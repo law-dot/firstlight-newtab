@@ -398,6 +398,9 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   max-width: 780px;
   align-self: center;
   position: relative;
+  /* 引擎面板 / 建议下拉都往下溢出到内容区上方，整行必须压在内容之上
+     （.search 的 backdrop-filter 是独立层叠上下文，面板自己的 z-index 出不去） */
+  z-index: 5;
 }
 
 .search-row .search { flex: 1; max-width: none; }
@@ -423,6 +426,9 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   border-color: var(--accent-soft);
 }
 
+/* 引擎：自绘下拉（原生下拉弹层在毛玻璃/部分显卡上会闪跳，改为页面内面板） */
+.engine-wrap { position: relative; flex: none; }
+
 .engine {
   appearance: none;
   border: none;
@@ -430,6 +436,7 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   color: var(--muted);
   font-size: 13px;
   font-weight: 500;
+  font-family: inherit;
   padding: 6px 18px 6px 4px;
   cursor: pointer;
   outline: none;
@@ -438,6 +445,75 @@ html[data-theme="light"] .wx-icon { color: #d98a12; }
   background-position: right 6px top 50%, right 1px top 50%;
   background-size: 4px 4px, 4px 4px;
   background-repeat: no-repeat;
+}
+
+.engine-pop {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  min-width: 168px;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--menu);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow);
+  z-index: 60;
+}
+
+.engine-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.engine-item:hover { background: var(--input); }
+
+.engine-item.on {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.engine-custom {
+  margin-top: 6px;
+  padding: 10px 10px 10px;
+  border-top: 1px solid var(--stroke);
+}
+
+.engine-custom input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: var(--input);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.engine-custom input:focus { border-color: var(--accent-soft); }
+
+.engine-custom .hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.engine-custom-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 /* 原生下拉展开的那一层：color-scheme 决定系统怎么画列表和悬停高亮，
@@ -2057,6 +2133,46 @@ body.drawer-open .drawer { transform: translateX(0); }
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 8px;
+}
+
+/* 强调色：小圆点单行排，与「自定义」同排，省两行竖向空间 */
+.accent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.swatches.accent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.swatches.accent .swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border-width: 2px;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+/* 色点只有 20px，自定义那块跟着压低，不然一行里高低不齐 */
+.accent-row .color-label {
+  height: 26px;
+  padding: 0 8px;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.swatches.accent .swatch:hover { transform: scale(1.15); }
+
+.swatches.accent .swatch.on {
+  border-color: transparent;
+  box-shadow:
+    0 0 0 2px var(--page, #14161c),
+    0 0 0 3.5px var(--text);
 }
 
 .swatch {
